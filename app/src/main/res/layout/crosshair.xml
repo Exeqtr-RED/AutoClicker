@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="48dp"
+    android:layout_height="48dp">
+
+    <TextView
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:gravity="center"
+        android:text="⊕"
+        android:textSize="36sp"
+        android:textColor="#ff2222"
+        android:shadowColor="#000000"
+        android:shadowRadius="4" />
+</FrameLayout>

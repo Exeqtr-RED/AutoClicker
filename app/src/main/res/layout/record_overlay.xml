@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <View
+        android:id="@+id/recordArea"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#2200FF00" />
+
+    <LinearLayout
+        android:id="@+id/stopRecordBtn"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="40dp"
+        android:background="#CC000000"
+        android:padding="12dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="● REC — тапните для стопа"
+            android:textColor="#ffffff"
+            android:textStyle="bold" />
+    </LinearLayout>
+</FrameLayout>
