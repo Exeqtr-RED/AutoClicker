@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
@@ -7,7 +8,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="12dp">
+        android:padding="16dp">
 
         <TextView
             android:id="@+id/tvTitle"
@@ -15,7 +16,9 @@
             android:layout_height="wrap_content"
             android:textStyle="bold"
             android:textSize="20sp"
-            android:paddingBottom="8dp" />
+            android:textColor="@color/text_primary"
+            android:paddingTop="8dp"
+            android:paddingBottom="12dp" />
 
         <!-- GroupBox: пресеты -->
         <LinearLayout
@@ -23,19 +26,21 @@
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:background="@drawable/groupbox_bg"
-            android:padding="12dp"
-            android:layout_marginBottom="8dp">
+            android:padding="16dp"
+            android:layout_marginBottom="12dp">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Сохранённые пресеты"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:textColor="@color/text_primary" />
 
             <HorizontalScrollView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:paddingTop="6dp">
+                android:paddingTop="8dp"
+                android:scrollbars="none">
 
                 <LinearLayout
                     android:id="@+id/llPresets"
@@ -48,6 +53,8 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:textSize="11sp"
+                android:textColor="@color/text_hint"
+                android:paddingTop="6dp"
                 android:text="Клик — загрузить, долгий тап — удалить" />
         </LinearLayout>
 
@@ -57,26 +64,29 @@
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:background="@drawable/groupbox_bg"
-            android:padding="12dp"
-            android:layout_marginBottom="8dp">
+            android:padding="16dp"
+            android:layout_marginBottom="12dp">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Новый пресет"
                 android:textStyle="bold"
-                android:paddingBottom="6dp" />
+                android:textColor="@color/text_primary"
+                android:paddingBottom="8dp" />
 
             <EditText
                 android:id="@+id/etName"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="Название пресета" />
+                android:hint="Название пресета"
+                android:textColor="@color/text_primary" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Тайминг:"
+                android:textColor="@color/text_secondary"
                 android:paddingTop="8dp" />
 
             <RadioGroup
@@ -88,20 +98,26 @@
                     android:id="@+id/rbInfinite"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:minHeight="44dp"
                     android:checked="true"
-                    android:text="Никогда не останавливаться" />
+                    android:text="Никогда не останавливаться"
+                    android:textColor="@color/text_primary" />
 
                 <RadioButton
                     android:id="@+id/rbDuration"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Длительность" />
+                    android:minHeight="44dp"
+                    android:text="Длительность"
+                    android:textColor="@color/text_primary" />
 
                 <RadioButton
                     android:id="@+id/rbCycles"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Количество циклов" />
+                    android:minHeight="44dp"
+                    android:text="Количество циклов"
+                    android:textColor="@color/text_primary" />
             </RadioGroup>
 
             <LinearLayout
@@ -118,10 +134,12 @@
                     android:layout_height="wrap_content"
                     android:inputType="number"
                     android:maxLength="2"
-                    android:hint="ЧЧ" />
+                    android:hint="ЧЧ"
+                    android:textColor="@color/text_primary" />
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:textColor="@color/text_secondary"
                     android:text=" : " />
                 <EditText
                     android:id="@+id/etMinutes"
@@ -129,10 +147,12 @@
                     android:layout_height="wrap_content"
                     android:inputType="number"
                     android:maxLength="2"
-                    android:hint="ММ" />
+                    android:hint="ММ"
+                    android:textColor="@color/text_primary" />
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:textColor="@color/text_secondary"
                     android:text=" : " />
                 <EditText
                     android:id="@+id/etSeconds"
@@ -140,7 +160,8 @@
                     android:layout_height="wrap_content"
                     android:inputType="number"
                     android:maxLength="2"
-                    android:hint="СС" />
+                    android:hint="СС"
+                    android:textColor="@color/text_primary" />
             </LinearLayout>
 
             <LinearLayout
@@ -157,7 +178,8 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:inputType="number"
-                    android:hint="Количество циклов" />
+                    android:hint="Количество циклов"
+                    android:textColor="@color/text_primary" />
             </LinearLayout>
 
             <!-- Задержка с подписью слева -->
@@ -171,6 +193,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:textColor="@color/text_secondary"
                     android:text="Задержка" />
 
                 <EditText
@@ -180,11 +203,13 @@
                     android:layout_weight="1"
                     android:layout_marginStart="8dp"
                     android:inputType="number"
+                    android:textColor="@color/text_primary"
                     android:text="100" />
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:textColor="@color/text_secondary"
                     android:text="мс"
                     android:layout_marginStart="4dp" />
             </LinearLayout>
@@ -193,16 +218,24 @@
             <Button
                 android:id="@+id/btnPickPoint"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
+                android:layout_height="52dp"
+                android:layout_marginTop="12dp"
+                android:minWidth="0dp"
+                android:background="@drawable/btn_secondary"
+                app:backgroundTint="@null"
+                android:stateListAnimator="@null"
+                android:textSize="15sp"
+                android:textColor="@color/text_primary"
+                android:textAllCaps="false"
                 android:text="Выберите место для тапа" />
 
             <TextView
                 android:id="@+id/tvPickedPoint"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:paddingTop="4dp"
+                android:paddingTop="6dp"
                 android:textSize="12sp"
+                android:textColor="@color/text_secondary"
                 android:text="Точка не выбрана" />
 
             <!-- Блок записи (только для MTWS) -->
@@ -216,43 +249,82 @@
                 <Button
                     android:id="@+id/btnRecord"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
+                    android:layout_height="52dp"
+                    android:layout_marginTop="8dp"
+                    android:minWidth="0dp"
+                    android:background="@drawable/btn_secondary"
+                    app:backgroundTint="@null"
+                    android:stateListAnimator="@null"
+                    android:textSize="15sp"
+                    android:textColor="@color/text_primary"
+                    android:textAllCaps="false"
                     android:text="Записать макрос" />
 
                 <TextView
                     android:id="@+id/tvRecCount"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:textColor="@color/text_secondary"
                     android:text="Записано действий: 0"
-                    android:paddingTop="4dp" />
+                    android:paddingTop="6dp" />
 
                 <Button
                     android:id="@+id/btnClearActions"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:minWidth="0dp"
+                    android:background="@drawable/btn_secondary"
+                    app:backgroundTint="@null"
+                    android:stateListAnimator="@null"
+                    android:textSize="15sp"
+                    android:textColor="@color/text_primary"
+                    android:textAllCaps="false"
                     android:text="Очистить действия" />
             </LinearLayout>
 
             <Button
                 android:id="@+id/btnSave"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
+                android:layout_height="52dp"
+                android:layout_marginTop="14dp"
+                android:minWidth="0dp"
+                android:background="@drawable/btn_secondary"
+                app:backgroundTint="@null"
+                android:stateListAnimator="@null"
+                android:textSize="15sp"
+                android:textColor="@color/text_primary"
+                android:textAllCaps="false"
                 android:text="Сохранить пресет" />
 
             <Button
                 android:id="@+id/btnStart"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="ЗАПУСТИТЬ"
-                android:textStyle="bold" />
+                android:layout_height="52dp"
+                android:layout_marginTop="8dp"
+                android:minWidth="0dp"
+                android:background="@drawable/btn_primary"
+                app:backgroundTint="@null"
+                android:stateListAnimator="@null"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:textColor="@color/text_primary"
+                android:textAllCaps="false"
+                android:text="ЗАПУСТИТЬ" />
 
             <Button
                 android:id="@+id/btnStop"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
+                android:layout_height="52dp"
+                android:layout_marginTop="8dp"
+                android:minWidth="0dp"
+                android:background="@drawable/btn_primary"
+                app:backgroundTint="@null"
+                android:stateListAnimator="@null"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:textColor="@color/text_primary"
+                android:textAllCaps="false"
                 android:visibility="gone"
                 android:text="ОСТАНОВИТЬ" />
         </LinearLayout>
@@ -261,7 +333,14 @@
         <Button
             android:id="@+id/btnBack"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="48dp"
+            android:minWidth="0dp"
+            android:background="@android:color/transparent"
+            app:backgroundTint="@null"
+            android:stateListAnimator="@null"
+            android:textSize="15sp"
+            android:textColor="@color/text_secondary"
+            android:textAllCaps="false"
             android:text="Назад" />
     </LinearLayout>
 </ScrollView>

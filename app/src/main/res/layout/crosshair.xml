@@ -1,15 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Прицел ST-режима: кольцо + ⊕, перетаскивается. Структура
+     FrameLayout -> TextView не менялась: clickMarker перекрашивает
+     дочерний TextView через getChildAt(0) -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="48dp"
-    android:layout_height="48dp">
+    android:layout_height="48dp"
+    android:background="@drawable/bg_crosshair">
 
     <TextView
         android:layout_width="48dp"
         android:layout_height="48dp"
         android:gravity="center"
         android:text="⊕"
-        android:textSize="36sp"
-        android:textColor="#ff2222"
+        android:textSize="26sp"
+        android:textColor="@color/accent_red"
         android:shadowColor="#000000"
         android:shadowRadius="4" />
 </FrameLayout>

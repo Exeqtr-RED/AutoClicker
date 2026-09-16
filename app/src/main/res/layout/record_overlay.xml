@@ -7,22 +7,36 @@
         android:id="@+id/recordArea"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="#2200FF00" />
+        android:background="#1A00E676" />
 
-    <LinearLayout
-        android:id="@+id/stopRecordBtn"
+    <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="40dp"
-        android:background="#CC000000"
-        android:padding="12dp">
+        android:layout_marginTop="48dp"
+        android:background="@drawable/bg_chip"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:text="● Идёт запись — тапы и свайпы сохраняются"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:textColor="@color/accent_orange" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="● REC — тапните для стопа"
-            android:textColor="#ffffff"
-            android:textStyle="bold" />
-    </LinearLayout>
+    <TextView
+        android:id="@+id/stopRecordBtn"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="48dp"
+        android:background="@drawable/btn_primary"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:paddingTop="14dp"
+        android:paddingBottom="14dp"
+        android:text="■  Остановить"
+        android:textSize="15sp"
+        android:textStyle="bold"
+        android:textColor="@color/text_primary" />
 </FrameLayout>

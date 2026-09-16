@@ -74,11 +74,16 @@ object PresetStorage {
 
     fun getAll(ctx: Context): List<Preset> {
         val s = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-            .getString(KEY, "[]") ?: "[]"
-        val arr = JSONArray(s)
-        val list = mutableListOf<Preset>()
-        for (i in 0 until arr.length()) list.add(Preset.fromJson(arr.getJSONObject(i)))
-        return list
+            .getString(KEY, null) ?: return emptyList()
+        // ФИКС: битый JSON больше не роняет приложение при каждом открытии
+        // настроек — строка целиком и каждая запись парсятся с защитой,
+        // повреждённые элементы просто пропускаются
+        return runCatching {
+            val arr = JSONArray(s)
+            (0 until arr.length()).mapNotNull { i ->
+                runCatching { Preset.fromJson(arr.getJSONObject(i)) }.getOrNull()
+            }
+        }.getOrDefault(emptyList())
     }
 
     fun getByMode(ctx: Context, mode: String): List<Preset> =

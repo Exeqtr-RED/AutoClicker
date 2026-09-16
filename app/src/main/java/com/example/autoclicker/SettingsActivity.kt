@@ -6,8 +6,17 @@ import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import org.json.JSONArray
 
 class SettingsActivity : AppCompatActivity() {
+
+    companion object {
+        private const val STATE_PICKED_X = "pickedX"
+        private const val STATE_PICKED_Y = "pickedY"
+        private const val STATE_RECORDED = "recordedActions"
+        private const val MIN_DELAY_MS = 20L
+        private const val MAX_DELAY_MS = 60_000L
+    }
 
     private lateinit var mode: String
     private var recordedActions = mutableListOf<PresetAction>()
@@ -37,6 +46,14 @@ class SettingsActivity : AppCompatActivity() {
         setContentView(R.layout.activity_settings)
 
         mode = intent.getStringExtra("mode") ?: "ST"
+
+        // ФИКС: выбранная точка и записанные действия переживают поворот экрана
+        // и уничтожение активности системой (раньше терялись молча)
+        if (savedInstanceState != null) {
+            pickedX = savedInstanceState.getInt(STATE_PICKED_X, -1)
+            pickedY = savedInstanceState.getInt(STATE_PICKED_Y, -1)
+            recordedActions = parseRecordedActions(savedInstanceState.getString(STATE_RECORDED))
+        }
 
         etName = findViewById(R.id.etName)
         etDelay = findViewById(R.id.etDelay)
@@ -92,8 +109,31 @@ class SettingsActivity : AppCompatActivity() {
         updatePickedPointLabel()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putInt(STATE_PICKED_X, pickedX)
+        outState.putInt(STATE_PICKED_Y, pickedY)
+        val arr = JSONArray()
+        recordedActions.forEach { arr.put(it.toJson()) }
+        outState.putString(STATE_RECORDED, arr.toString())
+    }
+
+    private fun parseRecordedActions(json: String?): MutableList<PresetAction> {
+        if (json.isNullOrEmpty()) return mutableListOf()
+        return runCatching {
+            val arr = JSONArray(json)
+            (0 until arr.length()).mapNotNull { i ->
+                runCatching { PresetAction.fromJson(arr.getJSONObject(i)) }.getOrNull()
+            }
+        }.getOrDefault(emptyList()).toMutableList()
+    }
+
     override fun onResume() {
         super.onResume()
+        // ФИКС: если пользователь выдал разрешение на оверлей, вернувшись из
+        // настроек системы, панель и крестик службы появятся сразу,
+        // без переподключения службы
+        ClickService.instance?.ensureOverlays()
         syncPlaybackState()
     }
 
@@ -108,7 +148,7 @@ class SettingsActivity : AppCompatActivity() {
             toast("Нет разрешения на оверлей")
             return
         }
-        svc.startPickPoint { x: Int, y: Int ->
+        val started = svc.startPickPoint { x: Int, y: Int ->
             pickedX = x
             pickedY = y
             runOnUiThread {
@@ -120,6 +160,11 @@ class SettingsActivity : AppCompatActivity() {
                 startActivity(i)
                 toast("Точка: $x, $y")
             }
+        }
+        // ФИКС: честная обратная связь — раньше служба могла молча отказать
+        if (!started) {
+            toast("Нельзя выбирать точку во время записи/воспроизведения")
+            return
         }
         moveTaskToBack(true)
     }
@@ -218,15 +263,36 @@ class SettingsActivity : AppCompatActivity() {
                     (etSeconds.text.toString().toLongOrNull() ?: 0L)
         else 0L
         val cycles = if (timingMode == "CYCLES")
-            etCycles.text.toString().toIntOrNull() ?: 1
+            etCycles.text.toString().toIntOrNull() ?: 0
         else 1
-        val delay = etDelay.text.toString().toLongOrNull() ?: 100L
+
+        // ФИКС: валидация тайминга — раньше DURATION=0 / CYCLES=0 приводили
+        // к мгновенной тихой остановке без единого действия
+        if (timingMode == "DURATION" && durationSec <= 0L) {
+            toast("Укажите длительность больше нуля")
+            return null
+        }
+        if (timingMode == "CYCLES" && cycles < 1) {
+            toast("Количество циклов должно быть не меньше 1")
+            return null
+        }
+
+        // ФИКС: задержка ограничена — 0 мс превращало воспроизведение в busy-poll
+        val delay = (etDelay.text.toString().toLongOrNull() ?: 100L)
+            .coerceIn(MIN_DELAY_MS, MAX_DELAY_MS)
 
         val actions: List<PresetAction> = when {
             mode == "MTWS" -> recordedActions.toList()
             pickedX >= 0 && pickedY >= 0 ->
                 listOf(PresetAction("tap", pickedX, pickedY, 0, 0, 0L))
-            else -> emptyList()
+            else -> emptyList() // ST без точки — тап по текущей позиции крестика
+        }
+
+        // ФИКС: пустой MTWS-пресет нельзя ни запустить, ни сохранить —
+        // раньше он сохранялся, а запуск молча ничего не делал
+        if (mode == "MTWS" && actions.isEmpty()) {
+            toast("Сначала запишите макрос")
+            return null
         }
 
         return Preset(
@@ -255,15 +321,23 @@ class SettingsActivity : AppCompatActivity() {
             toast("Служба Accessibility не включена")
             return
         }
-        toast("Запись началась. Тапайте/свайпайте по экрану. Стоп — кнопка REC сверху.")
-        svc.startRecording { actions ->
+        val started = svc.startRecording { actions ->
             runOnUiThread {
                 recordedActions = actions.toMutableList()
                 updateRecCount()
                 toast("Записано: ${actions.size}")
             }
         }
-        moveTaskToBack(true)
+        // ФИКС: тост только при реальном старте — раньше «Запись началась»
+        // показывалась даже если служба молча отказала (уже идёт запись/воспроизведение)
+        if (started) {
+            toast("Запись началась. Тапайте/свайпайте по экрану. Стоп — кнопка REC сверху.")
+            moveTaskToBack(true)
+        } else if (svc.isPlaying()) {
+            toast("Сначала остановите воспроизведение")
+        } else {
+            toast("Запись уже идёт")
+        }
     }
 
     private fun updateRecCount() {
@@ -283,10 +357,15 @@ class SettingsActivity : AppCompatActivity() {
             return
         }
         val p = buildPreset() ?: return
-        svc.startPlayback(p)
-        syncPlaybackState()
-        toast("Запущено: ${p.name}")
-        moveTaskToBack(true)
+        // ФИКС: тост «Запущено» только если playback реально стартовал —
+        // раньше он показывался даже при молча отказавшем запуске
+        if (svc.startPlayback(p)) {
+            syncPlaybackState()
+            toast("Запущено: ${p.name}")
+            moveTaskToBack(true)
+        } else {
+            toast("Не удалось запустить — служба занята записью или воспроизведением")
+        }
     }
 
     private fun stopPlayback() {

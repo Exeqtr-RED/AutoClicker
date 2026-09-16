@@ -8,20 +8,67 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
+import org.json.JSONObject
+import kotlin.random.Random
 
 class ClickService : AccessibilityService() {
 
     companion object {
         private const val TAG = "ClickService"
+
+        // ФИКС: состояние службы (последний пресет) переживает перезапуск службы
+        private const val STATE_PREFS = "service_state"
+        private const val KEY_LAST_PRESET = "last_preset"
+        private const val KEY_CROSSHAIR_HIDDEN = "crosshair_hidden"
+
+        // ФИКС: минимальная задержка между жестами — delay=0 превращал цикл в busy-poll
+        private const val MIN_DELAY_MS = 20L
+
+        // ФИКС: сколько подряд отменённых жестов считаем «жесты блокируются»
+        private const val MAX_CONSECUTIVE_CANCELS = 5
+
+        // ------------------------------------------------------------
+        // ФИЧА: анимация клика. Прицел на точке тапа сжимается и
+        // возвращается — визуальный отклик каждого клика.
+        // Окно помечено FLAG_NOT_TOUCHABLE, поэтому НЕ перехватывает
+        // касания (ни реальные, ни инжектируемые dispatchGesture) и
+        // не мешает кликам. Если на вашей прошивке жесты вдруг начнут
+        // отменяться (появится тост «Жесты блокируются») — поставьте false.
+        // ------------------------------------------------------------
+        private const val CLICK_ANIMATION_ENABLED = true
+        private const val CLICK_ANIM_DOWN_MS = 60L    // сжатие
+        private const val CLICK_ANIM_UP_MS = 90L      // возврат
+        private const val CLICK_ANIM_MIN_SCALE = 0.55f // насколько сжимается
+        private const val CLICK_ANIM_MIN_ALPHA = 0.65f // лёгкое «прожатие» прозрачностью
+
+        // ------------------------------------------------------------
+        // ФИЧА (эргономика): случайный сдвиг точки клика в пикселях —
+        // жесты не ложатся пиксель-в-пиксель (анти-детект, как в
+        // Quick Touch / OP Auto Clicker). 0 — выключить.
+        // ------------------------------------------------------------
+        private const val RANDOM_OFFSET_PX = 10
+
+        // ФИЧА: виброотклик на старт/стоп/паузу/удаление точки
+        private const val HAPTIC_ENABLED = true
+
         @Volatile
         var instance: ClickService? = null
             private set
@@ -35,6 +82,22 @@ class ClickService : AccessibilityService() {
     private var tvStatus: TextView? = null
     private var toggleBtn: Button? = null
 
+    // ФИЧА: счётчик кликов/таймер на панели
+    private var tvCounter: TextView? = null
+
+    // ФИЧА: кнопка паузы на панели
+    private var pauseBtnRef: Button? = null
+
+    // ФИЧА: кнопка списка пресетов и переключатель прицела на панели
+    private var presetsBtnRef: Button? = null
+    private var crosshairBtnRef: Button? = null
+
+    // ФИЧА: прицел можно скрыть кнопкой панели; состояние переживает рестарт
+    private var crosshairHidden = false
+
+    // ФИЧА: оверлей-список пресетов (выбор прямо из плавающей панели)
+    private var presetList: View? = null
+
     // Крестик
     private var crosshair: View? = null
     private var crosshairParams: WindowManager.LayoutParams? = null
@@ -42,6 +105,26 @@ class ClickService : AccessibilityService() {
     // Сохранённые координаты центра крестика (абсолютные, экранные)
     private var crosshairCenterX = 140f
     private var crosshairCenterY = 540f
+
+    // ФИЧА: анимация клика — виртуальный прицел на точке тапа
+    private var clickMarker: View? = null
+    private var clickMarkerParams: WindowManager.LayoutParams? = null
+
+    // ФИЧА: пузырь — панель, свёрнутая в круглую кнопку (как Assistive Touch)
+    private var bubble: View? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
+    private var bubbleIcon: TextView? = null
+
+    // ФИЧА: пауза воспроизведения (прогресс циклов не сбрасывается)
+    @Volatile private var paused = false
+    private var pauseStartMs = 0L
+
+    // ФИЧА: счётчик завершённых кликов за сессию
+    private var clickCount = 0
+
+    // ФИЧА: нумерованные точки MTWS (драг — переместить, долгий тап — удалить)
+    private class MtwsMarker(val view: View, val index: Int)
+    private val mtwsMarkers = mutableListOf<MtwsMarker>()
 
     // Оверлеи
     private var recordOverlay: View? = null
@@ -59,6 +142,7 @@ class ClickService : AccessibilityService() {
     private var cycleCount = 0
     private var startTimeMs = 0L
     @Volatile private var gestureInFlight = false
+    private var consecutiveCancels = 0
 
     // Recording
     private var recording = false
@@ -76,8 +160,34 @@ class ClickService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        lastPreset = restoreLastPreset()
+        crosshairHidden = runCatching {
+            getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
+                .getBoolean(KEY_CROSSHAIR_HIDDEN, false)
+        }.getOrDefault(false)
+        ensureOverlays()
+    }
+
+    /**
+     * ФИКС (краш BadTokenException): оверлеи добавляются только при выданном
+     * разрешении SYSTEM_ALERT_WINDOW. Раньше включение службы без разрешения
+     * роняло приложение в showPanel()/showCrosshair().
+     * Также вызывается из SettingsActivity.onResume() — когда пользователь
+     * вернулся с экрана выдачи разрешения, панель появляется без
+     * переподключения службы.
+     */
+    fun ensureOverlays(): Boolean {
+        if (!::wm.isInitialized) return false
+        if (!Settings.canDrawOverlays(this)) return false
         showPanel()
-        showCrosshair()
+        // ФИЧА: прицел опционален — показываем, если пользователь его не скрыл.
+        // Для MTWS-пресета крестик не нужен — его роль играют нумерованные точки
+        if (!crosshairHidden && lastPreset?.mode != "MTWS") {
+            syncCrosshairToPreset()
+            showCrosshair()
+        }
+        refreshMtwsMarkers()
+        return true
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
@@ -89,15 +199,23 @@ class ClickService : AccessibilityService() {
         if (::wm.isInitialized) {
             panel?.let { runCatching { wm.removeView(it) } }
             crosshair?.let { runCatching { wm.removeView(it) } }
+            clickMarker?.let { runCatching { wm.removeView(it) } }
+            bubble?.let { runCatching { wm.removeView(it) } }
+            presetList?.let { runCatching { wm.removeView(it) } }
             recordOverlay?.let { runCatching { wm.removeView(it) } }
             pickOverlay?.let { runCatching { wm.removeView(it) } }
+            hideMtwsMarkers()
         }
         panel = null; crosshair = null
+        clickMarker = null; clickMarkerParams = null
+        bubble = null; bubbleParams = null; bubbleIcon = null
+        presetList = null
         recordOverlay = null; pickOverlay = null
         super.onDestroy()
     }
 
     fun isPlaying(): Boolean = playing
+    fun isRecording(): Boolean = recording
 
     private fun overlayType(): Int =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
@@ -105,6 +223,28 @@ class ClickService : AccessibilityService() {
         else
             @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
+
+    private fun toast(s: String) {
+        runCatching { Toast.makeText(this, s, Toast.LENGTH_SHORT).show() }
+    }
+
+    /** ФИЧА: короткий клик-виброотклик (если включён HAPTIC_ENABLED) */
+    private fun haptic() {
+        if (!HAPTIC_ENABLED) return
+        runCatching {
+            val vib = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager)
+                    .defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                vib.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK))
+            else
+                vib.vibrate(20L)
+        }
+    }
 
     // ============================================================
     // Панель
@@ -124,17 +264,49 @@ class ClickService : AccessibilityService() {
             y = 200
         }
         panelParams = p
-        val v = LayoutInflater.from(this).inflate(R.layout.panel, null)
+        // ФИКС (краш службы «keeps stopping»): ошибка inflate больше не роняет
+        // процесс — пишем в лог и работаем без этого оверлея
+        val v = runCatching { LayoutInflater.from(this).inflate(R.layout.panel, null) }
+            .getOrElse { Log.e(TAG, "showPanel: inflate failed", it); return }
         panel = v
-        wm.addView(v, p)
+        if (runCatching { wm.addView(v, p) }.isFailure) {
+            Log.e(TAG, "showPanel: addView failed")
+            panel = null
+            return
+        }
 
         tvStatus = v.findViewById(R.id.tvStatus)
         toggleBtn = v.findViewById(R.id.toggleBtn)
+        tvCounter = v.findViewById(R.id.tvCounter)
+        pauseBtnRef = v.findViewById(R.id.pauseBtn)
+        presetsBtnRef = v.findViewById(R.id.presetsBtn)
+        crosshairBtnRef = v.findViewById(R.id.crosshairBtn)
+
+        // ФИЧА: пауза — прогресс циклов не сбрасывается
+        pauseBtnRef?.setOnClickListener { togglePause() }
+
+        // ФИЧА: свернуть панель в пузырь
+        v.findViewById<TextView>(R.id.minimizeBtn)?.setOnClickListener {
+            haptic()
+            collapseToBubble()
+        }
+
+        // ФИЧА: выбор пресета прямо из панели
+        v.findViewById<Button>(R.id.presetsBtn)?.setOnClickListener {
+            haptic()
+            togglePresetList()
+        }
+
+        // ФИЧА: скрыть/показать прицел
+        v.findViewById<Button>(R.id.crosshairBtn)?.setOnClickListener {
+            haptic()
+            toggleCrosshair()
+        }
 
         val handle = v.findViewById<View>(R.id.dragHandle)
-        handle.setOnTouchListener(object : View.OnTouchListener {
+        handle?.setOnTouchListener(object : View.OnTouchListener {
             var sx = 0; var sy = 0; var tx = 0f; var ty = 0f
-            override fun onTouch(view: View, e: MotionEvent): Boolean {
+            override fun onTouch(handleView: View, e: MotionEvent): Boolean {
                 when (e.action) {
                     MotionEvent.ACTION_DOWN -> {
                         sx = p.x; sy = p.y
@@ -144,7 +316,11 @@ class ClickService : AccessibilityService() {
                     MotionEvent.ACTION_MOVE -> {
                         p.x = sx + (e.rawX - tx).toInt()
                         p.y = sy + (e.rawY - ty).toInt()
-                        runCatching { wm.updateViewLayout(view, p) }
+                        // ФИКС: окно двигаем через КОРНЕВОЙ view панели (v),
+                        // а не через handle. Раньше в updateViewLayout уходил
+                        // дочерний view — метод бросал IllegalArgumentException
+                        // (глотался runCatching) и панель не двигалась вообще.
+                        runCatching { wm.updateViewLayout(v, p) }
                         return true
                     }
                 }
@@ -153,12 +329,20 @@ class ClickService : AccessibilityService() {
         })
 
         toggleBtn?.setOnClickListener {
-            if (playing) stopPlayback() else lastPreset?.let { startPlayback(it) }
+            haptic()
+            if (playing) {
+                stopPlayback()
+            } else {
+                lastPreset?.let { startPlayback(it) }
+                    ?: toast("Сначала выберите пресет (☰)")
+            }
         }
 
-        v.findViewById<Button>(R.id.closeBtn).setOnClickListener {
+        v.findViewById<Button>(R.id.closeBtn)?.setOnClickListener {
+            haptic()
             stopPlayback()
             stopRecordingInternal()
+            hidePresetList()
             panel?.let { runCatching { wm.removeView(it) } }
             crosshair?.let { runCatching { wm.removeView(it) } }
             panel = null; crosshair = null
@@ -174,15 +358,328 @@ class ClickService : AccessibilityService() {
             recording -> {
                 st.text = "●"; st.setTextColor(0xFFFFAA00.toInt())
                 tg.text = "REC"; tg.isEnabled = false
+                pauseBtnRef?.isEnabled = false
             }
             playing -> {
-                st.text = "●"; st.setTextColor(0xFF00CC44.toInt())
-                tg.text = "Стоп"; tg.isEnabled = true
+                if (paused) {
+                    st.text = "⏸"; st.setTextColor(0xFFFFB300.toInt())
+                    tg.text = "■"; tg.isEnabled = true
+                    pauseBtnRef?.text = "▶"; pauseBtnRef?.isEnabled = true
+                } else {
+                    st.text = "●"; st.setTextColor(0xFF00CC44.toInt())
+                    tg.text = "■"; tg.isEnabled = true
+                    pauseBtnRef?.text = "⏸"; pauseBtnRef?.isEnabled = true
+                }
             }
             else -> {
                 st.text = "●"; st.setTextColor(0xFFFF2222.toInt())
-                tg.text = "Старт"; tg.isEnabled = lastPreset != null
+                tg.text = "▶"; tg.isEnabled = lastPreset != null
+                pauseBtnRef?.text = "⏸"; pauseBtnRef?.isEnabled = false
             }
+        }
+        // ФИЧА: во время работы кнопки пресетов/прицела блокируются
+        val idle = !playing && !recording
+        presetsBtnRef?.isEnabled = idle
+        crosshairBtnRef?.isEnabled = idle
+        updateCrosshairButtonIcon()
+        updateCounter()
+    }
+
+    /** ФИЧА: счётчик кликов + таймер сессии в шапке панели */
+    private fun updateCounter() {
+        val tv = tvCounter ?: return
+        val secs: Long = when {
+            playing && !paused -> (System.currentTimeMillis() - startTimeMs) / 1000
+            playing && paused -> (pauseStartMs - startTimeMs) / 1000
+            else -> 0L
+        }
+        tv.text = "%d · %02d:%02d".format(clickCount, secs / 60, secs % 60)
+    }
+
+    /** ФИЧА: пауза — tick засыпает, прогресс циклов и таймер сохраняются */
+    private fun togglePause() {
+        if (!playing) return
+        paused = !paused
+        if (paused) {
+            pauseStartMs = System.currentTimeMillis()
+        } else {
+            // сдвигаем старт, чтобы DURATION-таймер не тикал в паузе
+            startTimeMs += System.currentTimeMillis() - pauseStartMs
+        }
+        haptic()
+        updatePanelState()
+        Log.d(TAG, "paused=$paused")
+    }
+
+    // ============================================================
+    // ФИЧА: прицел — показ/скрытие и синхронизация с пресетом
+    // ============================================================
+
+    /** Кнопка панели: скрыть/показать прицел. Состояние сохраняется. */
+    private fun toggleCrosshair() {
+        crosshairHidden = !crosshairHidden
+        runCatching {
+            getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE).edit()
+                .putBoolean(KEY_CROSSHAIR_HIDDEN, crosshairHidden).apply()
+        }
+        if (crosshairHidden) {
+            hideCrosshair()
+            toast("Прицел скрыт")
+        } else {
+            if (!playing && !recording) {
+                syncCrosshairToPreset()
+                showCrosshair()
+            }
+            toast("Прицел показан")
+        }
+        updateCrosshairButtonIcon()
+    }
+
+    private fun updateCrosshairButtonIcon() {
+        crosshairBtnRef?.text = if (crosshairHidden) "⊘" else "⊕"
+    }
+
+    /**
+     * ФИКС («после остановки прицел появляется в другом месте»): крестик
+     * ST-режима синхронизирован с точкой тапа последнего пресета. Раньше он
+     * возвращался на старую позицию, а клики шли по координатам пресета —
+     * прицел казался посторонним и бесполезным.
+     */
+    private fun syncCrosshairToPreset() {
+        val p = lastPreset ?: return
+        if (p.mode != "ST" || p.actions.isEmpty()) return
+        crosshairCenterX = p.actions[0].x1.toFloat()
+        crosshairCenterY = p.actions[0].y1.toFloat()
+        val cv = crosshair ?: return
+        val cp = crosshairParams ?: return
+        val half = 24f * resources.displayMetrics.density
+        cp.x = (crosshairCenterX - half).toInt()
+        cp.y = (crosshairCenterY - half).toInt()
+        runCatching { wm.updateViewLayout(cv, cp) }
+    }
+
+    /** ФИЧА: перетаскивание крестика двигает точку тапа ST-пресета (и сохраняет её) */
+    private fun saveCrosshairCenterToPreset() {
+        val preset = lastPreset ?: return
+        if (preset.mode != "ST" || preset.actions.isEmpty()) return
+        val nx = crosshairCenterX.toInt()
+        val ny = crosshairCenterY.toInt()
+        val old = preset.actions[0]
+        if (old.x1 == nx && old.y1 == ny) return
+        lastPreset = preset.copy(actions = preset.actions.mapIndexed { i, act ->
+            if (i == 0) act.copy(x1 = nx, y1 = ny) else act
+        })
+        persistLastPreset(lastPreset!!)
+    }
+
+    // ============================================================
+    // ФИЧА: список пресетов из плавающей панели
+    // ============================================================
+
+    private fun togglePresetList() {
+        if (presetList != null) {
+            hidePresetList()
+            return
+        }
+        if (playing || recording) {
+            toast("Сначала остановите кликер")
+            return
+        }
+        val presets = PresetStorage.getAll(this)
+        if (presets.isEmpty()) {
+            toast("Нет сохранённых пресетов")
+            return
+        }
+
+        val d = resources.displayMetrics.density
+        fun px(v: Int) = (v * d).toInt()
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.bg_panel)
+            setPadding(px(12), px(10), px(12), px(12))
+        }
+
+        val title = TextView(this).apply {
+            text = "Пресеты"
+            textSize = 14f
+            setTextColor(context.getColor(R.color.text_primary))
+            setPadding(0, 0, 0, px(8))
+        }
+        container.addView(title)
+
+        presets.forEach { preset ->
+            val label = if (preset.mode == "ST") preset.name else "MTWS · ${preset.name}"
+            val b = Button(this).apply {
+                text = label
+                textSize = 14f
+                isAllCaps = false
+                setTextColor(context.getColor(R.color.text_primary))
+                setBackgroundResource(R.drawable.btn_secondary)
+                stateListAnimator = null
+                setOnClickListener {
+                    haptic()
+                    applyPresetFromPanel(preset)
+                }
+            }
+            container.addView(b, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, px(42)
+            ).apply { topMargin = px(6) })
+        }
+
+        val scroll = ScrollView(this).apply { addView(container) }
+
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 40
+            y = 200
+            // много пресетов — ограничиваем высоту окна, содержимое скроллится
+            if (presets.size > 6) {
+                height = (resources.displayMetrics.heightPixels * 0.6f).toInt()
+            }
+        }
+
+        presetList = scroll
+        if (runCatching { wm.addView(scroll, lp) }.isFailure) {
+            Log.e(TAG, "togglePresetList: addView failed")
+            presetList = null
+            return
+        }
+    }
+
+    private fun applyPresetFromPanel(preset: Preset) {
+        hidePresetList()
+        lastPreset = preset
+        persistLastPreset(preset)
+        if (preset.mode == "ST") {
+            hideMtwsMarkers()
+            if (!crosshairHidden) {
+                syncCrosshairToPreset()
+                if (crosshair == null) showCrosshair()
+            }
+        } else {
+            // MTWS: крестик не нужен — его роль играют нумерованные точки
+            hideCrosshair()
+            refreshMtwsMarkers()
+        }
+        updatePanelState()
+        toast("Пресет: ${preset.name}")
+    }
+
+    private fun hidePresetList() {
+        presetList?.let { runCatching { wm.removeView(it) } }
+        presetList = null
+    }
+
+    // ============================================================
+    // Пузырь: панель, свёрнутая в круглую кнопку
+    // ============================================================
+
+    private fun collapseToBubble() {
+        if (bubble != null) return
+        hidePresetList()
+        panel?.let { runCatching { wm.removeView(it) } }
+        panel = null
+        tvStatus = null
+        toggleBtn = null
+        tvCounter = null
+        pauseBtnRef = null
+        presetsBtnRef = null
+        crosshairBtnRef = null
+        showBubble()
+    }
+
+    private fun expandFromBubble() {
+        hideBubble()
+        showPanel()
+    }
+
+    private fun showBubble() {
+        if (bubble != null) return
+        val p = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 48
+            y = 200
+        }
+        bubbleParams = p
+        val v = runCatching { LayoutInflater.from(this).inflate(R.layout.bubble, null) }
+            .getOrElse { Log.e(TAG, "showBubble: inflate failed", it); return }
+        bubble = v
+        bubbleIcon = v.findViewById(R.id.bubbleIcon)
+        if (runCatching { wm.addView(v, p) }.isFailure) {
+            Log.e(TAG, "showBubble: addView failed")
+            bubble = null
+            bubbleParams = null
+            bubbleIcon = null
+            return
+        }
+        updateBubbleIcon()
+
+        // Тап (без движения) — развернуть панель, драг — переместить пузырь
+        val slop = ViewConfiguration.get(this).scaledTouchSlop
+        v.setOnTouchListener(object : View.OnTouchListener {
+            var sx = 0; var sy = 0; var tx = 0f; var ty = 0f
+            var moved = false
+            override fun onTouch(view: View, e: MotionEvent): Boolean {
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        sx = p.x; sy = p.y
+                        tx = e.rawX; ty = e.rawY
+                        moved = false
+                        return true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = e.rawX - tx
+                        val dy = e.rawY - ty
+                        if (!moved && (Math.abs(dx) > slop || Math.abs(dy) > slop)) moved = true
+                        if (moved) {
+                            p.x = sx + dx.toInt()
+                            p.y = sy + dy.toInt()
+                            runCatching { wm.updateViewLayout(view, p) }
+                        }
+                        return true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        if (!moved) {
+                            haptic()
+                            expandFromBubble()
+                        }
+                        return true
+                    }
+                }
+                return false
+            }
+        })
+    }
+
+    private fun hideBubble() {
+        bubble?.let { runCatching { wm.removeView(it) } }
+        bubble = null
+        bubbleParams = null
+        bubbleIcon = null
+    }
+
+    /** Иконка пузыря отражает состояние: ▶ красный — стоит, ■ зелёный — играет */
+    private fun updateBubbleIcon() {
+        val tv = bubbleIcon ?: return
+        if (playing) {
+            tv.text = "■"
+            tv.setTextColor(0xFF00CC44.toInt())
+        } else {
+            tv.text = "▶"
+            tv.setTextColor(0xFFFF4B4B.toInt())
         }
     }
 
@@ -200,13 +697,21 @@ class ClickService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = (crosshairCenterX - 24).toInt()
-            y = (crosshairCenterY - 24).toInt()
+            // ФИКС: view размером 48dp — смещение считаем в dp, а не в «сырых» пикселях
+            val half = 24f * resources.displayMetrics.density
+            x = (crosshairCenterX - half).toInt()
+            y = (crosshairCenterY - half).toInt()
         }
         crosshairParams = p
-        val v = LayoutInflater.from(this).inflate(R.layout.crosshair, null)
+        val v = runCatching { LayoutInflater.from(this).inflate(R.layout.crosshair, null) }
+            .getOrElse { Log.e(TAG, "showCrosshair: inflate failed", it); return }
         crosshair = v
-        wm.addView(v, p)
+        if (runCatching { wm.addView(v, p) }.isFailure) {
+            Log.e(TAG, "showCrosshair: addView failed")
+            crosshair = null
+            crosshairParams = null
+            return
+        }
 
         v.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             updateCrosshairCenter(p, v)
@@ -226,6 +731,7 @@ class ClickService : AccessibilityService() {
                         p.y = sy + (e.rawY - ty).toInt()
                         runCatching { wm.updateViewLayout(view, p) }
                         updateCrosshairCenter(p, view)
+                        saveCrosshairCenterToPreset()
                         return true
                     }
                 }
@@ -248,14 +754,249 @@ class ClickService : AccessibilityService() {
     }
 
     // ============================================================
+    // ФИЧА: анимация клика (виртуальный прицел на точке тапа)
+    // ============================================================
+
+    /**
+     * Показывает «прицел» на точке клика. Это то же окно ⊕, что и крестик,
+     * но с двумя ключевыми отличиями:
+     *  1. FLAG_NOT_TOUCHABLE — окно прозрачно для касаний, поэтому НЕ может
+     *     перехватить инжектируемый dispatchGesture жест (именно из-за
+     *     перехвата обычный крестик убирается на время playback);
+     *  2. оно перекрашено в зелёный — цвет состояния «идёт воспроизведение».
+     * В ST-режиме стоит на месте, в MTWS — переставляется под каждое действие.
+     */
+    private fun showClickMarker(x: Float, y: Float) {
+        if (!CLICK_ANIMATION_ENABLED) return
+        val half = 24f * resources.displayMetrics.density
+
+        val existing = clickMarker
+        if (existing != null) {
+            // Уже показан — просто переставляем (MTWS: у каждого действия своя точка)
+            val p = clickMarkerParams ?: return
+            p.x = (x - half).toInt()
+            p.y = (y - half).toInt()
+            runCatching { wm.updateViewLayout(existing, p) }
+            return
+        }
+
+        val p = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            // центр окна = точка тапа
+            this.x = (x - half).toInt()
+            this.y = (y - half).toInt()
+        }
+        val v = runCatching { LayoutInflater.from(this).inflate(R.layout.crosshair, null) }
+            .getOrElse { Log.e(TAG, "showClickMarker: inflate failed", it); return }
+        // Перекрашиваем ⊕ в зелёный, чтобы не путать с перетаскиваемым
+        // красным крестиком. crosshair.xml: FrameLayout -> TextView
+        // ФИКС (ошибка 365:46 "Incomplete code"): безопасный вызов ?. нельзя
+        // цеплять сразу за as?-приведением — парсер читает «TextView?» как
+        // тип и спотыкается о «.setTextColor». Выносим приведение в переменную.
+        val markerText = (v as? ViewGroup)?.getChildAt(0) as? TextView
+        markerText?.setTextColor(0xFF00CC44.toInt())
+
+        clickMarkerParams = p
+        clickMarker = v
+        if (runCatching { wm.addView(v, p) }.isFailure) {
+            Log.e(TAG, "showClickMarker: addView failed")
+            clickMarker = null
+            clickMarkerParams = null
+        }
+    }
+
+    /**
+     * Импульс клика: прицел сжимается к центру (центр = точка тапа) и
+     * возвращается обратно. Сжатие чуть короче возврата — так анимация
+     * читается как «нажал-отпустил».
+     */
+    private fun animateClick() {
+        val v = clickMarker ?: return
+        v.animate().cancel()
+        v.scaleX = 1f
+        v.scaleY = 1f
+        v.alpha = 1f
+        v.animate()
+            .scaleX(CLICK_ANIM_MIN_SCALE)
+            .scaleY(CLICK_ANIM_MIN_SCALE)
+            .alpha(CLICK_ANIM_MIN_ALPHA)
+            .setDuration(CLICK_ANIM_DOWN_MS)
+            .withEndAction {
+                v.animate()
+                    .scaleX(1f).scaleY(1f)
+                    .alpha(1f)
+                    .setDuration(CLICK_ANIM_UP_MS)
+                    .start()
+            }
+            .start()
+    }
+
+    private fun hideClickMarker() {
+        clickMarker?.let { runCatching { wm.removeView(it) } }
+        clickMarker = null
+        clickMarkerParams = null
+    }
+
+    // ============================================================
+    // ФИЧА: нумерованные точки MTWS
+    // ============================================================
+
+    /**
+     * Показывает пронумерованные точки последнего MTWS-пресета — виден
+     * порядок обхода (как во всех популярных кликерах). Точка
+     * перетаскивается — новые координаты сохраняются в пресет;
+     * долгий тап — удаляет точку. Во время playback/записи/выбора точки
+     * маркеры скрываются: это touchable-оверлеи, они блокировали бы
+     * dispatchGesture (та же причина, по которой прячется крестик).
+     */
+    private fun refreshMtwsMarkers() {
+        hideMtwsMarkers()
+        if (playing || recording || pickOverlay != null) return
+        val preset = lastPreset ?: return
+        if (preset.mode != "MTWS") return
+        preset.actions.forEachIndexed { i, a ->
+            addMtwsMarker(i, a.x1.toFloat(), a.y1.toFloat())
+        }
+    }
+
+    private fun hideMtwsMarkers() {
+        if (mtwsMarkers.isEmpty()) return
+        val copy = mtwsMarkers.toList()
+        mtwsMarkers.clear()
+        copy.forEach { m -> runCatching { wm.removeView(m.view) } }
+    }
+
+    private fun addMtwsMarker(index: Int, x: Float, y: Float) {
+        val half = 16f * resources.displayMetrics.density // маркер 32dp
+        val p = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            // центр окна = точка действия
+            this.x = (x - half).toInt()
+            this.y = (y - half).toInt()
+        }
+        val v = runCatching { LayoutInflater.from(this).inflate(R.layout.point_marker, null) }
+            .getOrElse { Log.e(TAG, "addMtwsMarker: inflate failed", it); return }
+        v.findViewById<TextView>(R.id.tvPointNum)?.text = (index + 1).toString()
+
+        val marker = MtwsMarker(v, index)
+        mtwsMarkers.add(marker)
+        if (runCatching { wm.addView(v, p) }.isFailure) {
+            mtwsMarkers.remove(marker)
+            Log.e(TAG, "addMtwsMarker: addView failed")
+            return
+        }
+
+        // Перетаскивание; долгий тап без движения — удалить точку
+        val slop = ViewConfiguration.get(this).scaledTouchSlop
+        v.setOnTouchListener(object : View.OnTouchListener {
+            var sx = 0; var sy = 0; var tx = 0f; var ty = 0f
+            var moved = false
+            var longFired = false
+            var pendingLong: Runnable? = null
+
+            override fun onTouch(view: View, e: MotionEvent): Boolean {
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        sx = p.x; sy = p.y
+                        tx = e.rawX; ty = e.rawY
+                        moved = false
+                        longFired = false
+                        val captured = view
+                        pendingLong = Runnable {
+                            if (!moved && !longFired && mtwsMarkers.any { it.view === captured }) {
+                                longFired = true
+                                removeMtwsPoint(captured)
+                            }
+                        }
+                        handler.postDelayed(pendingLong!!, 600L)
+                        return true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = e.rawX - tx
+                        val dy = e.rawY - ty
+                        if (!moved && (Math.abs(dx) > slop || Math.abs(dy) > slop)) {
+                            moved = true
+                            pendingLong?.let { handler.removeCallbacks(it) }
+                        }
+                        if (moved) {
+                            p.x = sx + dx.toInt()
+                            p.y = sy + dy.toInt()
+                            runCatching { wm.updateViewLayout(view, p) }
+                        }
+                        return true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        pendingLong?.let { handler.removeCallbacks(it) }
+                        if (moved) saveMarkerPosition(view, p)
+                        return true
+                    }
+                }
+                return false
+            }
+        })
+    }
+
+    private fun removeMtwsPoint(view: View) {
+        val marker = mtwsMarkers.firstOrNull { it.view === view } ?: return
+        val preset = lastPreset ?: return
+        if (preset.actions.size <= 1) {
+            toast("Нельзя удалить последнюю точку")
+            return
+        }
+        haptic()
+        lastPreset = preset.copy(actions = preset.actions.filterIndexed { i, _ -> i != marker.index })
+        currentPreset = lastPreset
+        persistLastPreset(lastPreset!!)
+        mtwsMarkers.removeAll { it.view === view }
+        runCatching { wm.removeView(view) }
+        toast("Точка ${marker.index + 1} удалена")
+        // Пересобрать оставшиеся маркеры — они перенумеруются
+        refreshMtwsMarkers()
+    }
+
+    private fun saveMarkerPosition(view: View, p: WindowManager.LayoutParams) {
+        val marker = mtwsMarkers.firstOrNull { it.view === view } ?: return
+        val preset = lastPreset ?: return
+        if (view.width <= 0 || view.height <= 0) return
+        val cx = p.x + view.width / 2f
+        val cy = p.y + view.height / 2f
+        lastPreset = preset.copy(actions = preset.actions.mapIndexed { i, a ->
+            if (i == marker.index) a.copy(x1 = cx.toInt(), y1 = cy.toInt()) else a
+        })
+        currentPreset = lastPreset
+        persistLastPreset(lastPreset!!)
+    }
+
+    // ============================================================
     // Выбор точки (ST)
     // ============================================================
 
-    fun startPickPoint(onDone: (Int, Int) -> Unit) {
-        if (pickOverlay != null) return
+    /**
+     * ФИКС: возвращает Boolean и отказывает, если идёт playback или запись.
+     * Раньше выбор точки во время MTWS-воспроизведения приводил к тому,
+     * что hidePickOverlay() возвращал крестик на экран и блокировал жесты.
+     */
+    fun startPickPoint(onDone: (Int, Int) -> Unit): Boolean {
+        if (pickOverlay != null) return false
+        if (playing || recording) return false
+
         pickOnDone = onDone
         crosshair?.visibility = View.GONE
         panel?.visibility = View.GONE
+        hideMtwsMarkers()
 
         val p = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -265,9 +1006,18 @@ class ClickService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START }
 
-        val v = LayoutInflater.from(this).inflate(R.layout.pick_point_overlay, null)
+        val v = runCatching { LayoutInflater.from(this).inflate(R.layout.pick_point_overlay, null) }
+            .getOrElse { Log.e(TAG, "startPickPoint: inflate failed", it); return false }
         pickOverlay = v
-        wm.addView(v, p)
+        if (runCatching { wm.addView(v, p) }.isFailure) {
+            Log.e(TAG, "startPickPoint: addView failed")
+            pickOverlay = null
+            pickOnDone = null
+            crosshair?.visibility = View.VISIBLE
+            panel?.visibility = View.VISIBLE
+            refreshMtwsMarkers()
+            return false
+        }
 
         v.setOnTouchListener { _, e ->
             if (e.action == MotionEvent.ACTION_UP) {
@@ -280,65 +1030,117 @@ class ClickService : AccessibilityService() {
             }
             true
         }
+        return true
     }
 
     private fun hidePickOverlay() {
         pickOverlay?.let { runCatching { wm.removeView(it) } }
         pickOverlay = null
-        crosshair?.visibility = View.VISIBLE
         panel?.visibility = View.VISIBLE
+        // ФИКС: крестик возвращаем только вне playback.
+        // Во время ST-воспроизведения крестика вообще нет (removeView),
+        // во время MTWS он должен остаться скрытым.
+        if (!playing) crosshair?.visibility = View.VISIBLE
+        refreshMtwsMarkers()
     }
 
     // ============================================================
     // Playback
     // ============================================================
 
-    fun startPlayback(preset: Preset) {
-        if (playing || recording) return
-        if (preset.mode == "MTWS" && preset.actions.isEmpty()) return
+    /** Возвращает true, если воспроизведение реально запущено */
+    fun startPlayback(preset: Preset): Boolean {
+        if (playing || recording) return false
+        if (preset.mode == "MTWS" && preset.actions.isEmpty()) return false
 
         lastPreset = preset
+        persistLastPreset(preset)
         currentPreset = preset
         actionIndex = 0
         cycleCount = 0
         startTimeMs = System.currentTimeMillis()
         gestureInFlight = false
+        consecutiveCancels = 0
+        clickCount = 0
+        paused = false
         playing = true
 
+        // ФИЧА: нумерованные точки — touchable-оверлеи, на время playback
+        // убираем вместе с крестиком, чтобы не блокировали dispatchGesture
+        hideMtwsMarkers()
+        hidePresetList()
+
         if (preset.mode == "ST") {
-            // ВАЖНО: во время ST-воспроизведения крестик полностью убираем —
-            // иначе overlay блокирует dispatchGesture на некоторых прошивках.
+            // ВАЖНО: во время ST-воспроизведения перетаскиваемый крестик
+            // полностью убираем — иначе touchable-overlay блокирует
+            // dispatchGesture на некоторых прошивках.
+            // Его роль берёт clickMarker: он FLAG_NOT_TOUCHABLE, жестам
+            // не мешает и показывает анимацию клика.
             hideCrosshair()
         } else {
             crosshair?.visibility = View.GONE
         }
         updatePanelState()
+        updateBubbleIcon()
         Log.d(TAG, "startPlayback mode=${preset.mode} timing=${preset.timingMode} delay=${preset.delayMs}")
         handler.post(tick)
+        return true
     }
 
     fun stopPlayback() {
         if (!playing) return
         playing = false
+        paused = false
         gestureInFlight = false
         handler.removeCallbacks(tick)
+        hideClickMarker()
         if (currentPreset?.mode == "ST") {
-            if (crosshair == null) showCrosshair()
-        } else {
-            crosshair?.visibility = View.VISIBLE
+            // ФИКС: крестик возвращается ровно на точку тапа пресета
+            // (и только если пользователь его не скрыл кнопкой ⊘)
+            if (!crosshairHidden && crosshair == null) {
+                syncCrosshairToPreset()
+                showCrosshair()
+            }
         }
+        // MTWS: крестик не возвращаем — его роль играют нумерованные точки
+        // ФИЧА: вернуть нумерованные точки (если последний пресет MTWS)
+        refreshMtwsMarkers()
         updatePanelState()
+        updateBubbleIcon()
         Log.d(TAG, "stopPlayback")
     }
 
     private val gestureCallback = object : GestureResultCallback() {
-        override fun onCompleted(g: GestureDescription?) { gestureInFlight = false }
-        override fun onCancelled(g: GestureDescription?) { gestureInFlight = false }
+        override fun onCompleted(g: GestureDescription?) {
+            gestureInFlight = false
+            consecutiveCancels = 0
+            // ФИЧА: считаем только реально завершённые жесты
+            clickCount++
+            updateCounter()
+        }
+
+        override fun onCancelled(g: GestureDescription?) {
+            gestureInFlight = false
+            // ФИКС: серия подряд отменённых жестов обычно означает, что жесты
+            // блокирует оверлей либо координаты вне экрана. Раньше playback
+            // крутился вхолостую бесконечно — теперь останавливаемся и сообщаем.
+            consecutiveCancels++
+            if (playing && consecutiveCancels >= MAX_CONSECUTIVE_CANCELS) {
+                Log.w(TAG, "gestures cancelled $consecutiveCancels times in a row — stopping")
+                stopPlayback()
+                toast("Жесты блокируются — воспроизведение остановлено")
+            }
+        }
     }
 
     private val tick = object : Runnable {
         override fun run() {
             if (!playing) return
+            // ФИЧА: пауза — цикл спит, прогресс сохраняется
+            if (paused) {
+                handler.postDelayed(this, 100L)
+                return
+            }
             val preset = currentPreset ?: run { stopPlayback(); return }
 
             val shouldStop: Boolean = when (preset.timingMode) {
@@ -363,6 +1165,10 @@ class ClickService : AccessibilityService() {
                     tx = crosshairCenterX
                     ty = crosshairCenterY
                 }
+                // ФИЧА: визуальный отклик — прицел ставится на точку тапа
+                // и сжимается в момент клика
+                showClickMarker(tx, ty)
+                animateClick()
                 performTap(tx, ty)
                 cycleCount++
             } else {
@@ -376,20 +1182,38 @@ class ClickService : AccessibilityService() {
                 }
                 val a = preset.actions[actionIndex]
                 if (a.type == "tap") {
+                    showClickMarker(a.x1.toFloat(), a.y1.toFloat())
+                    animateClick()
                     performTap(a.x1.toFloat(), a.y1.toFloat())
                 } else {
+                    // Для свайпа — импульс в стартовой точке
+                    showClickMarker(a.x1.toFloat(), a.y1.toFloat())
+                    animateClick()
                     performSwipe(a.x1.toFloat(), a.y1.toFloat(),
                         a.x2.toFloat(), a.y2.toFloat(), a.swipeDurationMs)
                 }
                 actionIndex++
             }
 
-            handler.postDelayed(this, preset.delayMs)
+            // ФИКС: задержка ограничена снизу — пресет с delay=0 больше не
+            // превращает цикл в busy-poll
+            updateCounter()
+            handler.postDelayed(this, preset.delayMs.coerceAtLeast(MIN_DELAY_MS))
         }
     }
 
+    /** ФИЧА (анти-детект): случайный сдвиг координаты в пределах ±RANDOM_OFFSET_PX */
+    private fun jitterCoord(v: Float): Float =
+        if (RANDOM_OFFSET_PX > 0)
+            v + Random.nextInt(-RANDOM_OFFSET_PX, RANDOM_OFFSET_PX + 1)
+        else
+            v
+
     private fun performTap(x: Float, y: Float) {
-        val path = Path().apply { moveTo(x, y) }
+        // ФИЧА: случайный сдвиг — клики не ложатся пиксель-в-пиксель
+        val tx = jitterCoord(x)
+        val ty = jitterCoord(y)
+        val path = Path().apply { moveTo(tx, ty) }
         val stroke = GestureDescription.StrokeDescription(path, 0L, 50L)
         val g = GestureDescription.Builder().addStroke(stroke).build()
         gestureInFlight = true
@@ -399,14 +1223,19 @@ class ClickService : AccessibilityService() {
             Log.e(TAG, "dispatchGesture(tap) error", e)
             false
         }
-        Log.d(TAG, "tap ($x, $y) ok=$ok")
+        Log.d(TAG, "tap ($tx, $ty) ok=$ok")
         if (!ok) gestureInFlight = false
     }
 
     private fun performSwipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long) {
+        // ФИЧА: случайный сдвиг стартовой и конечной точек свайпа
+        val jx1 = jitterCoord(x1)
+        val jy1 = jitterCoord(y1)
+        val jx2 = jitterCoord(x2)
+        val jy2 = jitterCoord(y2)
         val path = Path().apply {
-            moveTo(x1, y1)
-            lineTo(x2, y2)
+            moveTo(jx1, jy1)
+            lineTo(jx2, jy2)
         }
         val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceAtLeast(50L))
         val g = GestureDescription.Builder().addStroke(stroke).build()
@@ -417,7 +1246,7 @@ class ClickService : AccessibilityService() {
             Log.e(TAG, "dispatchGesture(swipe) error", e)
             false
         }
-        Log.d(TAG, "swipe ($x1,$y1)->($x2,$y2) ok=$ok")
+        Log.d(TAG, "swipe ($jx1,$jy1)->($jx2,$jy2) ok=$ok")
         if (!ok) gestureInFlight = false
     }
 
@@ -425,13 +1254,20 @@ class ClickService : AccessibilityService() {
     // Recording
     // ============================================================
 
-    fun startRecording(onDone: (List<PresetAction>) -> Unit) {
-        if (recording || playing) return
+    /** Возвращает true, если запись реально началась */
+    fun startRecording(onDone: (List<PresetAction>) -> Unit): Boolean {
+        if (recording || playing) return false
         recordedActions = mutableListOf()
         onRecordDone = onDone
+        if (!showRecordOverlay()) {
+            onRecordDone = null
+            return false
+        }
         recording = true
-        showRecordOverlay()
+        hideMtwsMarkers()
+        hidePresetList()
         updatePanelState()
+        return true
     }
 
     fun stopRecordingInternal() {
@@ -441,12 +1277,13 @@ class ClickService : AccessibilityService() {
         val result = recordedActions.toList()
         val cb = onRecordDone
         onRecordDone = null
+        refreshMtwsMarkers()
         updatePanelState()
         cb?.invoke(result)
     }
 
-    private fun showRecordOverlay() {
-        if (recordOverlay != null) return
+    private fun showRecordOverlay(): Boolean {
+        if (recordOverlay != null) return true
         val p = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -455,12 +1292,17 @@ class ClickService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START }
         recordParams = p
-        val v = LayoutInflater.from(this).inflate(R.layout.record_overlay, null)
+        val v = runCatching { LayoutInflater.from(this).inflate(R.layout.record_overlay, null) }
+            .getOrElse { Log.e(TAG, "showRecordOverlay: inflate failed", it); return false }
         recordOverlay = v
-        wm.addView(v, p)
+        if (runCatching { wm.addView(v, p) }.isFailure) {
+            Log.e(TAG, "showRecordOverlay: addView failed")
+            recordOverlay = null
+            return false
+        }
 
         val area = v.findViewById<View>(R.id.recordArea)
-        area.setOnTouchListener { _, e ->
+        area?.setOnTouchListener { _, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY
@@ -489,9 +1331,10 @@ class ClickService : AccessibilityService() {
                 else -> true
             }
         }
-        v.findViewById<View>(R.id.stopRecordBtn).setOnClickListener {
+        v.findViewById<View>(R.id.stopRecordBtn)?.setOnClickListener {
             stopRecordingInternal()
         }
+        return true
     }
 
     private fun hideRecordOverlay() {
@@ -499,4 +1342,31 @@ class ClickService : AccessibilityService() {
         recordOverlay = null
         recordParams = null
     }
+
+    // ============================================================
+    // Последний пресет (переживает перезапуск службы)
+    // ============================================================
+
+    /**
+     * ФИКС: последний пресет хранится в SharedPreferences — после перезапуска
+     * службы (disableSelf / убийство системой) кнопка «Старт» на панели снова
+     * работает сразу после включения службы. Туда же пишутся правки точек
+     * MTWS (перетаскивание/удаление нумерованных маркеров).
+     */
+    private fun persistLastPreset(preset: Preset) {
+        runCatching {
+            getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_LAST_PRESET, preset.toJson().toString())
+                .apply()
+        }
+    }
+
+    private fun restoreLastPreset(): Preset? =
+        runCatching {
+            getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_LAST_PRESET, null)
+                ?.let { Preset.fromJson(JSONObject(it)) }
+        }.getOrNull()
 }
+

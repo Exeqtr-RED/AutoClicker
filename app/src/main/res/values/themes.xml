@@ -1,8 +1,13 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
+    <!-- Приложение всегда в тёмной теме: кликеры используют по ночам,
+         яркий светлый фон слепит и отвлекает от контента под оверлеями -->
     <style name="Base.Theme.AutoClicker" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your light theme here. -->
-        <!-- <item name="colorPrimary">@color/my_light_primary</item> -->
+        <item name="colorPrimary">@color/accent_red</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="android:windowBackground">@color/screen_bg</item>
+        <item name="android:statusBarColor">@color/screen_bg</item>
+        <item name="android:navigationBarColor">@color/screen_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 
     <style name="Theme.AutoClicker" parent="Base.Theme.AutoClicker" />

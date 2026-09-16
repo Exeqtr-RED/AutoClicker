@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<selector xmlns:android="http://schemas.android.com/apk/res/android">
-
-</selector>
+<!-- Свернувшаяся панель — круглый пузырь -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
+    <solid android:color="@color/bubble_bg" />
+    <stroke android:width="1dp" android:color="#33FFFFFF" />
+</shape>

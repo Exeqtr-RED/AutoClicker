@@ -2,4 +2,23 @@
 <resources>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- Палитра UI -->
+    <color name="accent_red">#FFFF4B4B</color>
+    <color name="accent_green">#FF00E676</color>
+    <color name="accent_orange">#FFFFB300</color>
+
+    <color name="screen_bg">#FF0E0F13</color>
+    <color name="card_bg">#FF17191F</color>
+    <color name="card_stroke">#26FFFFFF</color>
+
+    <color name="panel_bg">#E614151A</color>
+    <color name="panel_stroke">#1FFFFFFF</color>
+    <color name="bubble_bg">#F214151A</color>
+
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#99FFFFFF</color>
+    <color name="text_hint">#80FFFFFF</color>
+
+    <color name="btn_secondary_bg">#FF262932</color>
 </resources>
