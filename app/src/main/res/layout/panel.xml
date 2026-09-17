@@ -65,8 +65,8 @@
             android:background="@drawable/btn_icon" />
     </LinearLayout>
 
-    <!-- Старт / Стоп — иконка play вместо надписи -->
-    <Button
+    <!-- Старт / Стоп — иконка play/stop вместо надписи (вектор вместо текста: символ ⏸/▶ может рендериться эмодзи) -->
+    <ImageButton
         android:id="@+id/toggleBtn"
         android:layout_width="match_parent"
         android:layout_height="44dp"
@@ -74,13 +74,13 @@
         android:minHeight="0dp"
         android:background="@drawable/btn_primary"
         android:stateListAnimator="@null"
-        android:text="▶"
-        android:textSize="18sp"
-        android:textAllCaps="false"
-        android:textColor="@color/text_primary" />
+        android:src="@drawable/ic_play"
+        android:padding="10dp"
+        android:scaleType="fitCenter"
+        android:contentDescription="Старт / Стоп" />
 
-    <!-- Пауза — под Стартом (вертикальная компоновка) -->
-    <Button
+    <!-- Пауза — под Стартом (вертикальная компоновка); при паузе показывает ic_play (продолжить) -->
+    <ImageButton
         android:id="@+id/pauseBtn"
         android:layout_width="match_parent"
         android:layout_height="40dp"
@@ -89,9 +89,10 @@
         android:minHeight="0dp"
         android:background="@drawable/btn_secondary"
         android:stateListAnimator="@null"
-        android:text="⏸"
-        android:textSize="15sp"
-        android:textColor="@color/text_primary"
+        android:src="@drawable/ic_pause"
+        android:padding="9dp"
+        android:scaleType="fitCenter"
+        android:contentDescription="Пауза / Продолжить"
         android:enabled="false" />
 
     <!-- Нижний ряд: выбор пресета · прицел · закрыть -->

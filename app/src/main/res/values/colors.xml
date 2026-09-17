@@ -3,22 +3,32 @@
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 
-    <!-- Палитра UI -->
+    <!-- Палитра UI (Liquid Glass: неон cyan → purple на тёмном стекле) -->
     <color name="accent_red">#FFFF4B4B</color>
     <color name="accent_green">#FF00E676</color>
     <color name="accent_orange">#FFFFB300</color>
 
+    <!-- Неоновая палитра -->
+    <color name="accent_cyan">#FF4DD8FF</color>
+    <color name="accent_blue">#FF5B8CFF</color>
+    <color name="accent_purple">#FFA855F7</color>
+    <color name="accent_magenta">#FFD946EF</color>
+    <color name="neon_cyan_soft">#6638BDF8</color>
+    <color name="neon_purple_soft">#66A855F7</color>
+
     <color name="screen_bg">#FF0E0F13</color>
-    <color name="card_bg">#FF17191F</color>
+    <!-- Стеклянные поверхности: полупрозрачный тёмный фон -->
+    <color name="card_bg">#B31A1C24</color>
     <color name="card_stroke">#26FFFFFF</color>
 
-    <color name="panel_bg">#E614151A</color>
+    <color name="panel_bg">#CC14161C</color>
     <color name="panel_stroke">#1FFFFFFF</color>
-    <color name="bubble_bg">#F214151A</color>
+    <color name="bubble_bg">#E615161C</color>
+    <color name="glass_input">#CC14161D</color>
 
     <color name="text_primary">#FFFFFFFF</color>
     <color name="text_secondary">#99FFFFFF</color>
     <color name="text_hint">#80FFFFFF</color>
 
-    <color name="btn_secondary_bg">#FF262932</color>
+    <color name="btn_secondary_bg">#D923262F</color>
 </resources>

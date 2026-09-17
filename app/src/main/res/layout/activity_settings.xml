@@ -77,6 +77,11 @@
 
             <EditText
                 android:id="@+id/etName"
+                android:background="@drawable/bg_input"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:paddingTop="10dp"
+                android:paddingBottom="10dp"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:hint="Название пресета"
@@ -202,6 +207,11 @@
 
                 <EditText
                     android:id="@+id/etHours"
+                    android:background="@drawable/bg_input"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp"
                     android:layout_width="56dp"
                     android:layout_height="wrap_content"
                     android:inputType="number"
@@ -215,6 +225,11 @@
                     android:text=" : " />
                 <EditText
                     android:id="@+id/etMinutes"
+                    android:background="@drawable/bg_input"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp"
                     android:layout_width="56dp"
                     android:layout_height="wrap_content"
                     android:inputType="number"
@@ -228,6 +243,11 @@
                     android:text=" : " />
                 <EditText
                     android:id="@+id/etSeconds"
+                    android:background="@drawable/bg_input"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp"
                     android:layout_width="56dp"
                     android:layout_height="wrap_content"
                     android:inputType="number"
@@ -246,6 +266,11 @@
 
                 <EditText
                     android:id="@+id/etCycles"
+                    android:background="@drawable/bg_input"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
@@ -277,6 +302,11 @@
 
                     <EditText
                         android:id="@+id/etRepeatInterval"
+                        android:background="@drawable/bg_input"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:paddingTop="10dp"
+                        android:paddingBottom="10dp"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
@@ -320,6 +350,11 @@
 
                 <EditText
                     android:id="@+id/etDelay"
+                    android:background="@drawable/bg_input"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"

@@ -30,7 +30,7 @@
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
         android:layout_marginBottom="48dp"
-        android:background="@drawable/btn_primary"
+        android:background="@drawable/btn_stop"
         android:paddingStart="24dp"
         android:paddingEnd="24dp"
         android:paddingTop="14dp"

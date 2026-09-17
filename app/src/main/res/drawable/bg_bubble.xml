@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Свернувшаяся панель — круглый пузырь -->
+<!-- Свернувшаяся панель — круглый стеклянный пузырь с голубой кромкой -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
     <solid android:color="@color/bubble_bg" />
-    <stroke android:width="1dp" android:color="#33FFFFFF" />
+    <stroke android:width="1dp" android:color="@color/neon_cyan_soft" />
 </shape>

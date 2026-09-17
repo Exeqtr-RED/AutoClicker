@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Пилюля-подсказка / чип счётчика -->
+<!-- Пилюля-подсказка / чип счётчика: тёмное стекло -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="#CC101216" />
-    <stroke android:width="1dp" android:color="@color/panel_stroke" />
+    <solid android:color="#B3101218" />
+    <stroke android:width="1dp" android:color="@color/card_stroke" />
     <corners android:radius="20dp" />
 </shape>

@@ -23,6 +23,7 @@ import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Button
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -85,13 +86,13 @@ class ClickService : AccessibilityService() {
     private var panel: View? = null
     private var panelParams: WindowManager.LayoutParams? = null
     private var tvStatus: TextView? = null
-    private var toggleBtn: Button? = null
+    private var toggleBtn: ImageButton? = null
 
     // ФИЧА: счётчик кликов/таймер на панели
     private var tvCounter: TextView? = null
 
     // ФИЧА: кнопка паузы на панели
-    private var pauseBtnRef: Button? = null
+    private var pauseBtnRef: ImageButton? = null
 
     // ФИЧА: кнопка списка пресетов и переключатель прицела на панели
     private var presetsBtnRef: Button? = null
@@ -365,24 +366,24 @@ class ClickService : AccessibilityService() {
         when {
             recording -> {
                 st.text = "●"; st.setTextColor(0xFFFFAA00.toInt())
-                tg.text = "REC"; tg.isEnabled = false
+                tg.setImageResource(R.drawable.ic_rec); tg.isEnabled = false
                 pauseBtnRef?.isEnabled = false
             }
             playing -> {
                 if (paused) {
-                    st.text = "⏸"; st.setTextColor(0xFFFFB300.toInt())
-                    tg.text = "■"; tg.isEnabled = true
-                    pauseBtnRef?.text = "▶"; pauseBtnRef?.isEnabled = true
+                    st.text = "II"; st.setTextColor(0xFFFFB300.toInt())
+                    tg.setImageResource(R.drawable.ic_stop); tg.isEnabled = true
+                    pauseBtnRef?.setImageResource(R.drawable.ic_play); pauseBtnRef?.isEnabled = true
                 } else {
                     st.text = "●"; st.setTextColor(0xFF00CC44.toInt())
-                    tg.text = "■"; tg.isEnabled = true
-                    pauseBtnRef?.text = "⏸"; pauseBtnRef?.isEnabled = true
+                    tg.setImageResource(R.drawable.ic_stop); tg.isEnabled = true
+                    pauseBtnRef?.setImageResource(R.drawable.ic_pause); pauseBtnRef?.isEnabled = true
                 }
             }
             else -> {
                 st.text = "●"; st.setTextColor(0xFFFF2222.toInt())
-                tg.text = "▶"; tg.isEnabled = lastPreset != null
-                pauseBtnRef?.text = "⏸"; pauseBtnRef?.isEnabled = false
+                tg.setImageResource(R.drawable.ic_play); tg.isEnabled = lastPreset != null
+                pauseBtnRef?.setImageResource(R.drawable.ic_pause); pauseBtnRef?.isEnabled = false
             }
         }
         // ФИЧА: во время работы кнопки пресетов/прицела блокируются

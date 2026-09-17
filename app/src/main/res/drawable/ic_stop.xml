@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Стоп: белый квадрат со скруглением (замена текстового ■) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7.5,7 h9 q1,0 1,1 v8 q0,1 -1,1 h-9 q-1,0 -1,-1 v-8 q0,-1 1,-1 Z" />
+</vector>

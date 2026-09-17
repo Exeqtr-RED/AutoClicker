@@ -1,15 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Карточка секции: стекло с едва заметной неоновой кромкой -->
+<!-- Поле ввода: тёмное стекло с неоновой градиентной кромкой (как Text Field из кита) -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Внешний слой: приглушённый градиент cyan → purple -->
+    <!-- Внешний слой: градиентная кромка -->
     <item>
         <shape>
             <gradient
                 android:angle="315"
-                android:startColor="#3326C6DA"
-                android:endColor="#33A855F7"
+                android:startColor="#4D38BDF8"
+                android:endColor="#4DA855F7"
                 android:type="linear" />
-            <corners android:radius="18dp" />
+            <corners android:radius="14dp" />
         </shape>
     </item>
     <!-- Внутренний слой: стеклянная заливка -->
@@ -19,8 +19,8 @@
         android:start="1dp"
         android:end="1dp">
         <shape>
-            <solid android:color="@color/card_bg" />
-            <corners android:radius="17dp" />
+            <solid android:color="@color/glass_input" />
+            <corners android:radius="13dp" />
         </shape>
     </item>
 </layer-list>
