@@ -82,6 +82,78 @@
                 android:hint="Название пресета"
                 android:textColor="@color/text_primary" />
 
+            <!-- Блок записи (только для MTWS): запись + редактирование действий -->
+            <LinearLayout
+                android:id="@+id/llRecord"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Запись действий (тапы и свайпы)"
+                    android:textStyle="bold"
+                    android:textColor="@color/text_primary"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp" />
+
+                <Button
+                    android:id="@+id/btnRecord"
+                    android:layout_width="match_parent"
+                    android:layout_height="52dp"
+                    android:layout_marginTop="8dp"
+                    android:minWidth="0dp"
+                    android:background="@drawable/btn_primary"
+                    app:backgroundTint="@null"
+                    android:stateListAnimator="@null"
+                    android:textSize="15sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/text_primary"
+                    android:textAllCaps="false"
+                    android:text="Начать запись" />
+
+                <TextView
+                    android:id="@+id/tvRecCount"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/text_secondary"
+                    android:text="Записано действий: 0"
+                    android:paddingTop="6dp" />
+
+                <!-- Редактируемый список записанных действий (строки создаются в коде) -->
+                <LinearLayout
+                    android:id="@+id/llActions"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingTop="4dp" />
+
+                <TextView
+                    android:id="@+id/tvActionsHint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textSize="11sp"
+                    android:textColor="@color/text_hint"
+                    android:paddingTop="2dp"
+                    android:text="Число у действия — задержка после него (мс). Пауза перед повторным запуском пресета задаётся полем «Периодичность запуска»." />
+
+                <Button
+                    android:id="@+id/btnClearActions"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:minWidth="0dp"
+                    android:background="@drawable/btn_secondary"
+                    app:backgroundTint="@null"
+                    android:stateListAnimator="@null"
+                    android:textSize="15sp"
+                    android:textColor="@color/text_primary"
+                    android:textAllCaps="false"
+                    android:text="Очистить действия" />
+            </LinearLayout>
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -182,8 +254,58 @@
                     android:textColor="@color/text_primary" />
             </LinearLayout>
 
-            <!-- Задержка с подписью слева -->
+            <!-- Периодичность запуска (только для MTWS): пауза между прогонами пресета -->
             <LinearLayout
+                android:id="@+id/llRepeatRow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone"
+                android:layout_marginTop="8dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/text_secondary"
+                        android:text="Периодичность запуска" />
+
+                    <EditText
+                        android:id="@+id/etRepeatInterval"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:inputType="number"
+                        android:maxLength="6"
+                        android:textColor="@color/text_primary"
+                        android:text="1000" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/text_secondary"
+                        android:text="мс"
+                        android:layout_marginStart="4dp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textSize="11sp"
+                    android:textColor="@color/text_hint"
+                    android:paddingTop="2dp"
+                    android:text="Пауза после завершения всех действий перед повторным запуском пресета" />
+            </LinearLayout>
+
+            <!-- Задержка с подписью слева (только для ST: в MTWS задержка задаётся у каждого действия) -->
+            <LinearLayout
+                android:id="@+id/llDelayRow"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
@@ -237,51 +359,6 @@
                 android:textSize="12sp"
                 android:textColor="@color/text_secondary"
                 android:text="Точка не выбрана" />
-
-            <!-- Блок записи (только для MTWS) -->
-            <LinearLayout
-                android:id="@+id/llRecord"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:visibility="gone">
-
-                <Button
-                    android:id="@+id/btnRecord"
-                    android:layout_width="match_parent"
-                    android:layout_height="52dp"
-                    android:layout_marginTop="8dp"
-                    android:minWidth="0dp"
-                    android:background="@drawable/btn_secondary"
-                    app:backgroundTint="@null"
-                    android:stateListAnimator="@null"
-                    android:textSize="15sp"
-                    android:textColor="@color/text_primary"
-                    android:textAllCaps="false"
-                    android:text="Записать макрос" />
-
-                <TextView
-                    android:id="@+id/tvRecCount"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textColor="@color/text_secondary"
-                    android:text="Записано действий: 0"
-                    android:paddingTop="6dp" />
-
-                <Button
-                    android:id="@+id/btnClearActions"
-                    android:layout_width="match_parent"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="8dp"
-                    android:minWidth="0dp"
-                    android:background="@drawable/btn_secondary"
-                    app:backgroundTint="@null"
-                    android:stateListAnimator="@null"
-                    android:textSize="15sp"
-                    android:textColor="@color/text_primary"
-                    android:textAllCaps="false"
-                    android:text="Очистить действия" />
-            </LinearLayout>
 
             <Button
                 android:id="@+id/btnSave"

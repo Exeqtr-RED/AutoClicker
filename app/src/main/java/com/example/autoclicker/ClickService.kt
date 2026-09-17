@@ -3,6 +3,7 @@ package com.example.autoclicker
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Context
+import android.content.Intent
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.os.Build
@@ -41,6 +42,10 @@ class ClickService : AccessibilityService() {
 
         // ФИКС: минимальная задержка между жестами — delay=0 превращал цикл в busy-poll
         private const val MIN_DELAY_MS = 20L
+
+        // ФИЧА: потолок записанной паузы между действиями (мс) — случайная
+        // пауза «сделать кофе» во время записи не превращается в 10 минут ожидания
+        private const val MAX_REC_GAP_MS = 60_000L
 
         // ФИКС: сколько подряд отменённых жестов считаем «жесты блокируются»
         private const val MAX_CONSECUTIVE_CANCELS = 5
@@ -151,6 +156,9 @@ class ClickService : AccessibilityService() {
     private var downX = 0f
     private var downY = 0f
     private var downTime = 0L
+    // ФИЧА: момент последнего записанного действия — для измерения реальных
+    // пауз между действиями (потом редактируются в настройках MTWS)
+    private var lastRecTime = 0L
 
     // ============================================================
     // Lifecycle
@@ -1171,6 +1179,10 @@ class ClickService : AccessibilityService() {
                 animateClick()
                 performTap(tx, ty)
                 cycleCount++
+                updateCounter()
+                // ФИКС: задержка ограничена снизу — пресет с delay=0 больше не
+                // превращает цикл в busy-poll
+                handler.postDelayed(this, preset.delayMs.coerceAtLeast(MIN_DELAY_MS))
             } else {
                 if (preset.actions.isEmpty()) { stopPlayback(); return }
                 if (actionIndex >= preset.actions.size) {
@@ -1193,12 +1205,17 @@ class ClickService : AccessibilityService() {
                         a.x2.toFloat(), a.y2.toFloat(), a.swipeDurationMs)
                 }
                 actionIndex++
+                updateCounter()
+                // ФИЧА: индивидуальная задержка каждого действия — пауза после
+                // текущего действия перед следующим (записывается при записи и
+                // редактируется в MTWS-вкладке). После последнего действия цикла
+                // применяется ПЕРИОДИЧНОСТЬ — пауза между полными прогонами пресета
+                val nextDelay: Long = if (actionIndex >= preset.actions.size)
+                    preset.repeatIntervalMs
+                else
+                    preset.actions[actionIndex].delayMs
+                handler.postDelayed(this, nextDelay.coerceAtLeast(MIN_DELAY_MS))
             }
-
-            // ФИКС: задержка ограничена снизу — пресет с delay=0 больше не
-            // превращает цикл в busy-poll
-            updateCounter()
-            handler.postDelayed(this, preset.delayMs.coerceAtLeast(MIN_DELAY_MS))
         }
     }
 
@@ -1258,6 +1275,7 @@ class ClickService : AccessibilityService() {
     fun startRecording(onDone: (List<PresetAction>) -> Unit): Boolean {
         if (recording || playing) return false
         recordedActions = mutableListOf()
+        lastRecTime = System.currentTimeMillis()
         onRecordDone = onDone
         if (!showRecordOverlay()) {
             onRecordDone = null
@@ -1270,7 +1288,12 @@ class ClickService : AccessibilityService() {
         return true
     }
 
-    fun stopRecordingInternal() {
+    /**
+     * ФИЧА: bringBackEditor = true (остановка кнопкой «Остановить» на оверлее)
+     * возвращает окно настроек на экран, чтобы пользователь сразу отредактировал
+     * записанные действия. При остановке через ✕ панели окно не поднимается.
+     */
+    fun stopRecordingInternal(bringBackEditor: Boolean = false) {
         if (!recording) return
         recording = false
         hideRecordOverlay()
@@ -1279,7 +1302,20 @@ class ClickService : AccessibilityService() {
         onRecordDone = null
         refreshMtwsMarkers()
         updatePanelState()
+        if (bringBackEditor) bringBackSettingsEditor()
         cb?.invoke(result)
+    }
+
+    /** ФИЧА: поднять окно настроек (MTWS) после остановки записи */
+    private fun bringBackSettingsEditor() {
+        runCatching {
+            val i = Intent(this, SettingsActivity::class.java).apply {
+                // NEW_TASK обязателен: startActivity идёт из контекста службы
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                putExtra("mode", "MTWS")
+            }
+            startActivity(i)
+        }.onFailure { Log.e(TAG, "bringBackSettingsEditor: failed", it) }
     }
 
     private fun showRecordOverlay(): Boolean {
@@ -1314,16 +1350,26 @@ class ClickService : AccessibilityService() {
                     val dt = System.currentTimeMillis() - downTime
                     val dx = upX - downX; val dy = upY - downY
                     val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+                    // ФИЧА: реальная пауза между действиями записывается как задержка
+                    // ПРЕДЫДУЩЕГО действия (потом её можно отредактировать в
+                    // настройках). Новое действие добавляется с задержкой 0
+                    val now = System.currentTimeMillis()
+                    if (recordedActions.isNotEmpty()) {
+                        val gap = (now - lastRecTime).coerceIn(0L, MAX_REC_GAP_MS)
+                        val li = recordedActions.size - 1
+                        recordedActions[li] = recordedActions[li].copy(delayMs = gap)
+                    }
+                    lastRecTime = now
                     if (dist < 40f) {
                         recordedActions.add(
-                            PresetAction("tap", downX.toInt(), downY.toInt(), 0, 0, 0L)
+                            PresetAction("tap", downX.toInt(), downY.toInt(), 0, 0, 0L, delayMs = 0L)
                         )
                     } else {
                         recordedActions.add(
                             PresetAction("swipe",
                                 downX.toInt(), downY.toInt(),
                                 upX.toInt(), upY.toInt(),
-                                dt.coerceIn(50L, 5000L))
+                                dt.coerceIn(50L, 5000L), delayMs = 0L)
                         )
                     }
                     true
@@ -1331,8 +1377,10 @@ class ClickService : AccessibilityService() {
                 else -> true
             }
         }
+        // ФИЧА: стоп-кнопка на оверлее останавливает запись и возвращает
+        // окно настроек для редактирования записанных действий
         v.findViewById<View>(R.id.stopRecordBtn)?.setOnClickListener {
-            stopRecordingInternal()
+            stopRecordingInternal(bringBackEditor = true)
         }
         return true
     }

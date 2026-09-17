@@ -10,21 +10,32 @@ data class PresetAction(
     val y1: Int,
     val x2: Int,
     val y2: Int,
-    val swipeDurationMs: Long
+    val swipeDurationMs: Long,
+    // ФИЧА: индивидуальная задержка ПОСЛЕ этого действия перед следующим (мс).
+    // У последнего действия цикла не используется — пауза перед повторным
+    // запуском пресета задаётся полем Preset.repeatIntervalMs («Периодичность»)
+    val delayMs: Long = 100L
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("type", type)
         put("x1", x1); put("y1", y1)
         put("x2", x2); put("y2", y2)
         put("swipeDurationMs", swipeDurationMs)
+        put("delayMs", delayMs)
     }
 
     companion object {
-        fun fromJson(o: JSONObject) = PresetAction(
+        /**
+         * ФИЧА (обратная совместимость): в пресетах старого формата у действий
+         * нет поля delayMs — тогда каждому действию назначается глобальная
+         * задержка старого пресета, и ритм воспроизведения не меняется.
+         */
+        fun fromJson(o: JSONObject, fallbackDelayMs: Long = 100L) = PresetAction(
             o.getString("type"),
             o.getInt("x1"), o.getInt("y1"),
             o.getInt("x2"), o.getInt("y2"),
-            o.optLong("swipeDurationMs", 300L)
+            o.optLong("swipeDurationMs", 300L),
+            o.optLong("delayMs", fallbackDelayMs)
         )
     }
 }
@@ -36,6 +47,9 @@ data class Preset(
     val durationSec: Long,
     val cycles: Int,
     val delayMs: Long,
+    // ФИЧА: периодичность запуска пресета (мс) — пауза после завершения
+    // всех действий перед повторным прогоном. Для ST-пресетов = 0
+    val repeatIntervalMs: Long = 0L,
     val actions: List<PresetAction>
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
@@ -45,6 +59,7 @@ data class Preset(
         put("durationSec", durationSec)
         put("cycles", cycles)
         put("delayMs", delayMs)
+        put("repeatIntervalMs", repeatIntervalMs)
         val arr = JSONArray()
         actions.forEach { arr.put(it.toJson()) }
         put("actions", arr)
@@ -52,16 +67,20 @@ data class Preset(
 
     companion object {
         fun fromJson(o: JSONObject): Preset {
+            val legacyDelay = o.optLong("delayMs", 100L)
             val arr = o.optJSONArray("actions") ?: JSONArray()
             val list = mutableListOf<PresetAction>()
-            for (i in 0 until arr.length()) list.add(PresetAction.fromJson(arr.getJSONObject(i)))
+            for (i in 0 until arr.length()) {
+                list.add(PresetAction.fromJson(arr.getJSONObject(i), legacyDelay))
+            }
             return Preset(
                 o.getString("name"),
                 o.getString("mode"),
                 o.getString("timingMode"),
                 o.optLong("durationSec", 0L),
                 o.optInt("cycles", 1),
-                o.optLong("delayMs", 100L),
+                legacyDelay,
+                o.optLong("repeatIntervalMs", 0L),
                 list
             )
         }
