@@ -36,10 +36,14 @@ jobs:
           java-version: '21'
           cache: gradle
 
-      # SDK предустановлен на ubuntu-latest; шаг гарантирует принятые лицензии
-      # и наличие платформы compileSdk (AGP докачает недостающее сам)
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      # ФИКС: SDK предустановлен на ubuntu-latest, AGP сам докачает недостающие
+      # платформы/build-tools. Экшен android-actions/setup-android@v3 убран:
+      # после принятия лицензий он пытается установить устаревший пакет "tools",
+      # удалённый Google из репозитория SDK, и падает
+      # ("Failed to find package 'tools'" -> exit code 1).
+      # Оставляем только принятие лицензий штатным sdkmanager раннера.
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Build debug and release APKs
         run: |
