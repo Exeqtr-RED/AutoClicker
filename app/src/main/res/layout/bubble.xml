@@ -1,16 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Свернувшаяся панель: круглый пузырь, тап — развернуть, драг — переместить -->
+<!-- Свернувшаяся панель: круглый пузырь, тап — развернуть, драг — переместить.
+     ФИЧА: векторная иконка «развернуть» вместо глифа «▶» (выглядел как play) -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="48dp"
     android:layout_height="48dp"
     android:background="@drawable/bg_bubble">
 
-    <TextView
+    <ImageView
         android:id="@+id/bubbleIcon"
         android:layout_width="48dp"
         android:layout_height="48dp"
-        android:gravity="center"
-        android:text="▶"
-        android:textSize="18sp"
-        android:textColor="@color/accent_red" />
+        android:padding="13dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_expand"
+        android:contentDescription="Развернуть панель" />
 </FrameLayout>

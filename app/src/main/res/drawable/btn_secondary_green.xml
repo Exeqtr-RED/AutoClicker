@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Кнопка «активно»: зелёная пилюля — разрешение выдано / служба включена.
+     Форма и радиус как у btn_secondary, чтобы кнопка не «прыгала» при смене состояния -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#40FFFFFF">
+    <item>
+        <shape>
+            <gradient
+                android:angle="315"
+                android:startColor="@color/accent_green"
+                android:endColor="#FF00C853" />
+            <stroke android:width="1dp" android:color="#59FFFFFF" />
+            <corners android:radius="22dp" />
+        </shape>
+    </item>
+</ripple>

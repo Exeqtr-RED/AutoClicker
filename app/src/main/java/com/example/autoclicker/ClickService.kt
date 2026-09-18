@@ -24,17 +24,24 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Button
 import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONObject
+import java.lang.ref.WeakReference
 import kotlin.random.Random
 
 class ClickService : AccessibilityService() {
 
     companion object {
         private const val TAG = "ClickService"
+
+        // ФИКС (перф/приватность): отладочный лог выключен по умолчанию —
+        // координаты каждого клика (до 50 строк/сек) не пишутся в logcat.
+        // Для диагностики поставьте true.
+        private const val LOG_DEBUG = false
 
         // ФИКС: состояние службы (последний пресет) переживает перезапуск службы
         private const val STATE_PREFS = "service_state"
@@ -119,7 +126,7 @@ class ClickService : AccessibilityService() {
     // ФИЧА: пузырь — панель, свёрнутая в круглую кнопку (как Assistive Touch)
     private var bubble: View? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
-    private var bubbleIcon: TextView? = null
+    private var bubbleIcon: ImageView? = null
 
     // ФИЧА: пауза воспроизведения (прогресс циклов не сбрасывается)
     @Volatile private var paused = false
@@ -136,7 +143,13 @@ class ClickService : AccessibilityService() {
     private var recordOverlay: View? = null
     private var recordParams: WindowManager.LayoutParams? = null
     private var pickOverlay: View? = null
-    private var pickOnDone: ((Int, Int) -> Unit)? = null
+    // ФИКС (утечка памяти): колбэк захватывает SettingsActivity, а служба
+    // живёт дольше окна. Сильную ссылку держит активность (pendingPickCb),
+    // служба — только WeakReference: уничтоженное окно больше не удерживается
+    private var pickOnDoneRef: WeakReference<(Int, Int) -> Unit>? = null
+    // ФИКС: результат выбора точки переживает пересоздание окна настроек —
+    // забирается в SettingsActivity.onResume() через consumePickResult()
+    private var lastPickResult: Pair<Int, Int>? = null
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -153,7 +166,12 @@ class ClickService : AccessibilityService() {
     // Recording
     private var recording = false
     private var recordedActions = mutableListOf<PresetAction>()
-    private var onRecordDone: ((List<PresetAction>) -> Unit)? = null
+    // ФИКС (утечка памяти): как и pickOnDoneRef — колбэк хранится через
+    // WeakReference, сильную ссылку держит SettingsActivity
+    private var onRecordDoneRef: WeakReference<(List<PresetAction>) -> Unit>? = null
+    // ФИКС: результат записи переживает пересоздание окна настроек —
+    // забирается в SettingsActivity.onResume() через consumeRecordResult()
+    private var lastRecordResult: List<PresetAction>? = null
     private var downX = 0f
     private var downY = 0f
     private var downTime = 0L
@@ -188,10 +206,16 @@ class ClickService : AccessibilityService() {
     fun ensureOverlays(): Boolean {
         if (!::wm.isInitialized) return false
         if (!Settings.canDrawOverlays(this)) return false
-        showPanel()
+        // ФИКС: если панель свёрнута в пузырь — не показываем её развёрнутой
+        // копией поверх (раньше onResume окна настроек разворачивал панель,
+        // оставляя пузырь висеть рядом)
+        if (bubble == null) showPanel()
         // ФИЧА: прицел опционален — показываем, если пользователь его не скрыл.
         // Для MTWS-пресета крестик не нужен — его роль играют нумерованные точки
-        if (!crosshairHidden && lastPreset?.mode != "MTWS") {
+        // ФИКС: во время playback/записи крестик НЕ возвращаем — touchable-
+        // оверлей блокирует dispatchGesture (раньше onResume окна настроек
+        // во время ST-воспроизведения возвращал крестик и ломал клики)
+        if (!playing && !recording && !crosshairHidden && lastPreset?.mode != "MTWS") {
             syncCrosshairToPreset()
             showCrosshair()
         }
@@ -215,6 +239,11 @@ class ClickService : AccessibilityService() {
             pickOverlay?.let { runCatching { wm.removeView(it) } }
             hideMtwsMarkers()
         }
+        // ФИКС (утечка памяти): колбэки и результаты — вместе с окнами
+        pickOnDoneRef = null
+        onRecordDoneRef = null
+        lastPickResult = null
+        lastRecordResult = null
         panel = null; crosshair = null
         clickMarker = null; clickMarkerParams = null
         bubble = null; bubbleParams = null; bubbleIcon = null
@@ -226,6 +255,24 @@ class ClickService : AccessibilityService() {
     fun isPlaying(): Boolean = playing
     fun isRecording(): Boolean = recording
 
+    /**
+     * ФИКС (утечка + потеря данных): результаты записи и выбора точки
+     * забираются окном настроек в onResume(). Если окно было пересоздано,
+     * пока шла запись/выбор точки, доставить колбэк некому — результат
+     * дожидается здесь и не теряется.
+     */
+    fun consumePickResult(): Pair<Int, Int>? {
+        val r = lastPickResult
+        lastPickResult = null
+        return r
+    }
+
+    fun consumeRecordResult(): List<PresetAction>? {
+        val r = lastRecordResult
+        lastRecordResult = null
+        return r
+    }
+
     private fun overlayType(): Int =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -233,8 +280,29 @@ class ClickService : AccessibilityService() {
             @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
 
+    /**
+     * ФИКС («клики не совпадают с выбранным местом»): TYPE_APPLICATION_OVERLAY
+     * по умолчанию раскладывается в области НИЖЕ статус-бара — p.x/p.y были
+     * координатами «полезной области», тогда как e.rawX/rawY (запись/выбор
+     * точки) и GestureDescription (performTap/performSwipe) — АБСОЛЮТНЫЕ
+     * экранные координаты. Смешение двух систем давало сдвиг ровно на высоту
+     * статус-бара: перетаскиваемый крестик/маркеры сохранялись в пресет со
+     * сдвигом и кликали выше видимого положения, зелёный маркер рисовался ниже
+     * реального тапа. FLAG_LAYOUT_IN_SCREEN переводит x/y ВСЕХ оверлеев в
+     * единую абсолютную систему (origin — левый верхний угол дисплея), общую
+     * с rawX/rawY и dispatchGesture.
+     */
+    private fun overlayFlags(base: Int): Int =
+        base or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+
     private fun toast(s: String) {
         runCatching { Toast.makeText(this, s, Toast.LENGTH_SHORT).show() }
+    }
+
+    /** Отладочный лог (см. LOG_DEBUG): inline — когда выключен, строки даже
+     *  не собираются, ноль расходов на каждый тик */
+    private inline fun dbg(msg: () -> String) {
+        if (LOG_DEBUG) Log.d(TAG, msg())
     }
 
     /** ФИЧА: короткий клик-виброотклик (если включён HAPTIC_ENABLED) */
@@ -265,7 +333,7 @@ class ClickService : AccessibilityService() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            overlayFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE),
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -414,10 +482,15 @@ class ClickService : AccessibilityService() {
         } else {
             // сдвигаем старт, чтобы DURATION-таймер не тикал в паузе
             startTimeMs += System.currentTimeMillis() - pauseStartMs
+            // ФИКС: в паузе цепочка tick остановлена совсем — здесь запускаем
+            // заново (removeCallbacks снимает возможные «хвосты», чтобы цикл
+            // не задвоился)
+            handler.removeCallbacks(tick)
+            handler.post(tick)
         }
         haptic()
         updatePanelState()
-        Log.d(TAG, "paused=$paused")
+        dbg { "paused=$paused" }
     }
 
     // ============================================================
@@ -542,7 +615,7 @@ class ClickService : AccessibilityService() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            overlayFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE),
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -615,7 +688,7 @@ class ClickService : AccessibilityService() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            overlayFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE),
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -680,16 +753,15 @@ class ClickService : AccessibilityService() {
         bubbleIcon = null
     }
 
-    /** Иконка пузыря отражает состояние: ▶ красный — стоит, ■ зелёный — играет */
+    /** ФИЧА: иконка пузыря = «развернуть панель» (двойная диагональная стрелка).
+     *  Раньше стоял глиф «▶» — он выглядел как кнопка play, и пользователь мог
+     *  подумать, что тап запустит скрипт, хотя пузырь только разворачивает панель.
+     *  Форма теперь всегда означает «развернуть», а состояние лишь подсвечивается
+     *  цветом: красный — стоит, зелёный — играет */
     private fun updateBubbleIcon() {
-        val tv = bubbleIcon ?: return
-        if (playing) {
-            tv.text = "■"
-            tv.setTextColor(0xFF00CC44.toInt())
-        } else {
-            tv.text = "▶"
-            tv.setTextColor(0xFFFF4B4B.toInt())
-        }
+        val iv = bubbleIcon ?: return
+        iv.setImageResource(R.drawable.ic_expand)
+        iv.setColorFilter(if (playing) 0xFF00CC44.toInt() else 0xFFFF4B4B.toInt())
     }
 
     // ============================================================
@@ -702,7 +774,7 @@ class ClickService : AccessibilityService() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            overlayFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE),
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -793,8 +865,8 @@ class ClickService : AccessibilityService() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            overlayFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE),
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -888,7 +960,7 @@ class ClickService : AccessibilityService() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            overlayFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE),
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -1002,7 +1074,7 @@ class ClickService : AccessibilityService() {
         if (pickOverlay != null) return false
         if (playing || recording) return false
 
-        pickOnDone = onDone
+        pickOnDoneRef = WeakReference(onDone)
         crosshair?.visibility = View.GONE
         panel?.visibility = View.GONE
         hideMtwsMarkers()
@@ -1011,7 +1083,7 @@ class ClickService : AccessibilityService() {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            overlayFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE),
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START }
 
@@ -1021,7 +1093,7 @@ class ClickService : AccessibilityService() {
         if (runCatching { wm.addView(v, p) }.isFailure) {
             Log.e(TAG, "startPickPoint: addView failed")
             pickOverlay = null
-            pickOnDone = null
+            pickOnDoneRef = null
             crosshair?.visibility = View.VISIBLE
             panel?.visibility = View.VISIBLE
             refreshMtwsMarkers()
@@ -1033,9 +1105,16 @@ class ClickService : AccessibilityService() {
                 val x = e.rawX.toInt()
                 val y = e.rawY.toInt()
                 hidePickOverlay()
-                val cb = pickOnDone
-                pickOnDone = null
-                cb?.invoke(x, y)
+                // Сначала результат — в страховочное хранилище: если живой
+                // получатель не найдётся (окно уничтожено), его заберёт
+                // SettingsActivity.onResume() и выбор точки не потеряется
+                lastPickResult = x to y
+                val cb = pickOnDoneRef?.get()
+                pickOnDoneRef = null
+                if (cb != null) {
+                    lastPickResult = null
+                    cb.invoke(x, y)
+                }
             }
             true
         }
@@ -1091,7 +1170,9 @@ class ClickService : AccessibilityService() {
         }
         updatePanelState()
         updateBubbleIcon()
-        Log.d(TAG, "startPlayback mode=${preset.mode} timing=${preset.timingMode} delay=${preset.delayMs}")
+        dbg { "startPlayback mode=${preset.mode} timing=${preset.timingMode} delay=${preset.delayMs}" }
+        // ФИКС: снимаем возможные «хвосты» tick — цепочка цикла всегда одна
+        handler.removeCallbacks(tick)
         handler.post(tick)
         return true
     }
@@ -1116,7 +1197,7 @@ class ClickService : AccessibilityService() {
         refreshMtwsMarkers()
         updatePanelState()
         updateBubbleIcon()
-        Log.d(TAG, "stopPlayback")
+        dbg { "stopPlayback" }
     }
 
     private val gestureCallback = object : GestureResultCallback() {
@@ -1145,11 +1226,10 @@ class ClickService : AccessibilityService() {
     private val tick = object : Runnable {
         override fun run() {
             if (!playing) return
-            // ФИЧА: пауза — цикл спит, прогресс сохраняется
-            if (paused) {
-                handler.postDelayed(this, 100L)
-                return
-            }
+            // ФИЧА + ФИКС (перф): в паузе цикл засыпает совсем, без опроса
+            // каждые 100 мс. Возобновление в togglePause() запускает цепочку
+            // заново; прогресс циклов и таймер при этом сохраняются
+            if (paused) return
             val preset = currentPreset ?: run { stopPlayback(); return }
 
             val shouldStop: Boolean = when (preset.timingMode) {
@@ -1241,7 +1321,7 @@ class ClickService : AccessibilityService() {
             Log.e(TAG, "dispatchGesture(tap) error", e)
             false
         }
-        Log.d(TAG, "tap ($tx, $ty) ok=$ok")
+        dbg { "tap ($tx, $ty) ok=$ok" }
         if (!ok) gestureInFlight = false
     }
 
@@ -1264,7 +1344,7 @@ class ClickService : AccessibilityService() {
             Log.e(TAG, "dispatchGesture(swipe) error", e)
             false
         }
-        Log.d(TAG, "swipe ($jx1,$jy1)->($jx2,$jy2) ok=$ok")
+        dbg { "swipe ($jx1,$jy1)->($jx2,$jy2) ok=$ok" }
         if (!ok) gestureInFlight = false
     }
 
@@ -1277,9 +1357,10 @@ class ClickService : AccessibilityService() {
         if (recording || playing) return false
         recordedActions = mutableListOf()
         lastRecTime = System.currentTimeMillis()
-        onRecordDone = onDone
+        lastRecordResult = null
+        onRecordDoneRef = WeakReference(onDone)
         if (!showRecordOverlay()) {
-            onRecordDone = null
+            onRecordDoneRef = null
             return false
         }
         recording = true
@@ -1299,12 +1380,18 @@ class ClickService : AccessibilityService() {
         recording = false
         hideRecordOverlay()
         val result = recordedActions.toList()
-        val cb = onRecordDone
-        onRecordDone = null
+        // Страховка: результат переживает уничтожение окна настроек —
+        // его заберёт SettingsActivity.onResume() через consumeRecordResult()
+        lastRecordResult = result
+        val cb = onRecordDoneRef?.get()
+        onRecordDoneRef = null
         refreshMtwsMarkers()
         updatePanelState()
         if (bringBackEditor) bringBackSettingsEditor()
-        cb?.invoke(result)
+        if (cb != null) {
+            lastRecordResult = null
+            cb.invoke(result)
+        }
     }
 
     /** ФИЧА: поднять окно настроек (MTWS) после остановки записи */
@@ -1325,7 +1412,7 @@ class ClickService : AccessibilityService() {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            overlayFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE),
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START }
         recordParams = p

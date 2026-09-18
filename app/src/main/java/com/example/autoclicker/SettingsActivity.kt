@@ -48,6 +48,13 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
 
+    // ФИКС (утечка памяти): сильные ссылки на колбэки держит АКТИВНОСТЬ,
+    // служба хранит только WeakReference. Пока окно живо — колбэк будет
+    // доставлен; когда окно уничтожено — колбэк собирается GC и активность
+    // не удерживается службой
+    private var pendingPickCb: ((Int, Int) -> Unit)? = null
+    private var pendingRecordCb: ((List<PresetAction>) -> Unit)? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_settings)
@@ -124,7 +131,6 @@ class SettingsActivity : AppCompatActivity() {
         btnStart.setOnClickListener { startPlayback() }
         btnStop.setOnClickListener { stopPlayback() }
         btnPickPoint.setOnClickListener { pickPoint() }
-        findViewById<Button>(R.id.btnBack).setOnClickListener { finish() }
 
         refreshPresets()
         updateRecCount()
@@ -160,7 +166,30 @@ class SettingsActivity : AppCompatActivity() {
         // настроек системы, панель и крестик службы появятся сразу,
         // без переподключения службы
         ClickService.instance?.ensureOverlays()
+
+        // ФИКС: если окно пересоздали, пока шла запись/выбор точки, колбэк
+        // доставить было некому — забираем результаты из службы здесь
+        ClickService.instance?.consumePickResult()?.let { (x, y) ->
+            pickedX = x
+            pickedY = y
+            updatePickedPointLabel()
+            toast("Точка: $x, $y")
+        }
+        ClickService.instance?.consumeRecordResult()?.let { actions ->
+            recordedActions = actions.toMutableList()
+            updateRecCount()
+            rebuildActionsList()
+            toast("Записано: ${actions.size} — отредактируйте задержки")
+        }
         syncPlaybackState()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // ФИКС (утечка памяти): окно уничтожается — снимаем сильные ссылки на
+        // колбэки; WeakReference в службе очистится, утечки активности нет
+        pendingPickCb = null
+        pendingRecordCb = null
     }
 
     // ---------- Выбор точки тапа ----------
@@ -174,7 +203,8 @@ class SettingsActivity : AppCompatActivity() {
             toast("Нет разрешения на оверлей")
             return
         }
-        val started = svc.startPickPoint { x: Int, y: Int ->
+        val cb: (Int, Int) -> Unit = { x: Int, y: Int ->
+            pendingPickCb = null
             pickedX = x
             pickedY = y
             runOnUiThread {
@@ -187,6 +217,8 @@ class SettingsActivity : AppCompatActivity() {
                 toast("Точка: $x, $y")
             }
         }
+        pendingPickCb = cb
+        val started = svc.startPickPoint(cb)
         // ФИКС: честная обратная связь — раньше служба могла молча отказать
         if (!started) {
             toast("Нельзя выбирать точку во время записи/воспроизведения")
@@ -361,7 +393,8 @@ class SettingsActivity : AppCompatActivity() {
             toast("Служба Accessibility не включена")
             return
         }
-        val started = svc.startRecording { actions ->
+        val cb: (List<PresetAction>) -> Unit = { actions ->
+            pendingRecordCb = null
             runOnUiThread {
                 recordedActions = actions.toMutableList()
                 updateRecCount()
@@ -369,6 +402,8 @@ class SettingsActivity : AppCompatActivity() {
                 toast("Записано: ${actions.size}. Окно снова открыто — отредактируйте задержки")
             }
         }
+        pendingRecordCb = cb
+        val started = svc.startRecording(cb)
         // ФИКС: тост только при реальном старте — раньше «Запись началась»
         // показывалась даже если служба молча отказала (уже идёт запись/воспроизведение)
         if (started) {

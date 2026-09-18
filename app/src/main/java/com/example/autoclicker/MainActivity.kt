@@ -37,10 +37,36 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnA11y).setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
+    }
 
-        findViewById<Button>(R.id.btnBack).setOnClickListener {
-            finish()
-        }
+    override fun onResume() {
+        super.onResume()
+        refreshPermissionButtons()
+    }
+
+    // ФИКС: статус обеих кнопок обновляется при каждом возврате на экран
+    // (в т.ч. из системных настроек оверлея/Accessibility) — включённая
+    // служба/выданное разрешение подсвечивают кнопку зелёным
+    private fun refreshPermissionButtons() {
+        val overlayOk = Settings.canDrawOverlays(this)
+        val a11yOk = isClickServiceEnabled()
+
+        findViewById<Button>(R.id.btnOverlay).setBackgroundResource(
+            if (overlayOk) R.drawable.btn_secondary_green else R.drawable.btn_secondary
+        )
+        findViewById<Button>(R.id.btnA11y).setBackgroundResource(
+            if (a11yOk) R.drawable.btn_secondary_green else R.drawable.btn_secondary
+        )
+    }
+
+    private fun isClickServiceEnabled(): Boolean {
+        val expected = "$packageName/${ClickService::class.java.name}"
+        val enabled = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        // Список включённых служб хранится как «пакет/класс:пакет/класс:…»
+        return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
     }
 
     private fun openSettings(mode: String) {

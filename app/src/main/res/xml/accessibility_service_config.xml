@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- ФИКС (перф/батарея): onAccessibilityEvent пуст — подписка на события
+     (typeWindowStateChanged) убрана, чтобы система не гоняла IPC-поток
+     событий при каждой смене окна. Инжекция жестов (canPerformGestures)
+     от событий НЕ зависит и продолжит работать. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:notificationTimeout="500"
     android:canRetrieveWindowContent="false"

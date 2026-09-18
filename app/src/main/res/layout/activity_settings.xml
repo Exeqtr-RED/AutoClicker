@@ -440,19 +440,5 @@
                 android:visibility="gone"
                 android:text="ОСТАНОВИТЬ" />
         </LinearLayout>
-
-        <!-- Кнопка Назад -->
-        <Button
-            android:id="@+id/btnBack"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:minWidth="0dp"
-            android:background="@android:color/transparent"
-            app:backgroundTint="@null"
-            android:stateListAnimator="@null"
-            android:textSize="15sp"
-            android:textColor="@color/text_secondary"
-            android:textAllCaps="false"
-            android:text="Назад" />
     </LinearLayout>
 </ScrollView>

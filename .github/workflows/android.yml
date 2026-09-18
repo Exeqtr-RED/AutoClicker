@@ -1,0 +1,84 @@
+# ФИЧА: автоматическая сборка APK на каждый push + выкладка в Releases по тегам.
+#
+# Как этим пользоваться:
+#  - Любой push в main (и PR) -> workflows собирают debug + release APK,
+#    их можно скачать на вкладке Actions запуска (Artifacts).
+#  - Чтобы опубликовать релиз: git tag v1.1 && git push origin v1.1 ->
+#    workflow создаст GitHub Release с APK внутри и автозаметками.
+#
+# Примечание: release-APK собирается БЕЗ подписи (unsigned) — установить его
+# напрямую нельзя, используйте debug-APK или настройте подпись секретами:
+#   secrets.KEYSTORE_BASE64 (base64 от .jks) + secrets.KEYSTORE_PASSWORD +
+#   secrets.KEY_ALIAS + secrets.KEY_PASSWORD, затем добавьте signingConfig
+#   в app/build.gradle.kts.
+
+name: Android CI
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      # SDK предустановлен на ubuntu-latest; шаг гарантирует принятые лицензии
+      # и наличие платформы compileSdk (AGP докачает недостающее сам)
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build debug and release APKs
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug assembleRelease
+
+      - name: Upload APKs (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: SekiraCliker-apks
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
+
+      # mapping.txt нужен, чтобы деобфусцировать стек-трейсы release-сборки
+      # (включена R8-минификация, см. app/build.gradle.kts)
+      - name: Upload R8 mapping (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: SekiraCliker-mapping
+          path: app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: ignore
+
+  release:
+    # Публикуем в Releases только по тегам вида v1.0, v2.3.1, ...
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built APKs
+        uses: actions/download-artifact@v4
+        with:
+          name: SekiraCliker-apks
+          path: apks
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: apks/*.apk
+          generate_release_notes: true
