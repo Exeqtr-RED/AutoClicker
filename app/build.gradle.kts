@@ -46,30 +46,49 @@ android {
     }
 }
 
-// ФИЧА (Task 26): удобное имя файла — после каждой release-сборки в папке
+// ФИЧА (Task 26/28/29): удобное имя файла — после release-сборки в папке
 // <корень проекта>/dist/ появляется копия APK с именем "Sekira Cliker.apk".
-// Классическое переименование через applicationVariants в AGP 9 УДАЛЕНО,
-// поэтому используется простая задача-копия на стабильном API.
-// Код совместим с configuration cache (включён в gradle.properties):
-// все пути фиксируются на фазе конфигурации, в doLast — только автоимпортируемые
-// kotlin.io-расширения (resolve/copyTo) — без java.* (см. ВАЖНО ниже)
-val releaseApkDir = layout.buildDirectory.dir("outputs/apk/release")
-val distDir = rootProject.layout.projectDirectory.dir("dist")
-
-tasks.matching { it.name == "assembleRelease" }.configureEach {
+// Классическое переименование через applicationVariants в AGP 9 УДАЛЕНО —
+// используется отдельная задача-финализатор на стабильном API.
+//
+// Три жёстких ограничения, учтённые здесь:
+// 1. Configuration cache (включён в gradle.properties): действия задач НЕ имеют
+//    права ссылаться на объект build-скрипта (топ-уровневые val, layout,
+//    rootProject) — иначе в САМОМ КОНЦЕ сборки возникает
+//    "cannot serialize Gradle script object references", весь билд
+//    помечается FAILED, хотя задачи уже выполнились (v10 на CI).
+//    Поэтому значения фиксируются ЛОКАЛЬНЫМИ val внутри конфигурации задачи
+//    (документированный паттерн), а финализатор подключается ПО ИМЕНИ.
+// 2. UP-TO-DATE: doLast у UP-TO-DATE задач не выполняется — копирование
+//    не в assembleRelease, а в отдельную задачу через finalizedBy.
+// 3. Gradle Kotlin DSL: java.io.File(...) не резолвится — только
+//    автоимпортируемые kotlin.io-расширения (resolve/copyTo).
+tasks.register("copyReleaseApk") {
+    group = "build"
+    description = "Копирует release-APK как 'Sekira Cliker.apk' в dist/"
+    // Значения фиксируются на фазе конфигурации: project.* берётся от самой
+    // задачи (не от скрипта), результат — обычные java-файлы, CC-сериализуемо
+    val apkDirFile = project.layout.buildDirectory.dir("outputs/apk/release").get().asFile
+    val distDirFile = project.rootDir.resolve("dist")
     doLast {
-        val dir = releaseApkDir.get().asFile
-        val apk = dir.listFiles()
+        val apk = apkDirFile.listFiles()
             ?.filter { it.isFile && it.name.endsWith(".apk") }
-            ?.maxByOrNull { it.lastModified() } ?: return@doLast
-        // ВАЖНО (Task 27): НЕ использовать "java.io.File(...)" в build.gradle.kts —
-        // имя "java" внутри скрипта занято расширением плагина, и "java.io"
-        // не резолвится ("Unresolved reference 'io'"). resolve() из kotlin.io
-        // доступен в скриптах автоматически, без импортов
-        val target = distDir.asFile.resolve("Sekira Cliker.apk")
+            ?.maxByOrNull { it.lastModified() }
+        if (apk == null) {
+            println(">>> [Sekira] ВНИМАНИЕ: release-APK не найден в ${apkDirFile.absolutePath}")
+            println(">>> [Sekira] Сначала соберите release: gradlew assembleRelease")
+            return@doLast
+        }
+        val target = distDirFile.resolve("Sekira Cliker.apk")
         apk.copyTo(target, overwrite = true)
         println(">>> APK готов: ${target.absolutePath}")
     }
+}
+
+// Финализатор ПО ИМЕНИ (строкой): ссылка на топ-уровневый val задачи внутри
+// конфигурационного действия захватывает объект скрипта и ломает configuration cache
+tasks.matching { it.name == "assembleRelease" }.configureEach {
+    finalizedBy("copyReleaseApk")
 }
 
 dependencies {
