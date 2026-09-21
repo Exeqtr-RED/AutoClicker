@@ -55,6 +55,21 @@ class ClickService : AccessibilityService() {
         // пауза «сделать кофе» во время записи не превращается в 10 минут ожидания
         private const val MAX_REC_GAP_MS = 60_000L
 
+        // ФИЧА (живой предпросмотр записи): после отпускания пальца записанный
+        // жест мгновенно воспроизводится на экране — список реально скроллится,
+        // тапы реально нажимаются, и видно, куда попадут следующие действия.
+        // Пауза перед воспроизведением нужна, чтобы система успела применить
+        // FLAG_NOT_TOUCHABLE к оверлею записи, иначе инжектируемый жест
+        // перехватится самим оверлеем (известная ловушка dispatchGesture).
+        private const val REPLAY_DELAY_MS = 120L
+
+        // ФИКС: MotionEvent.FLAG_IS_GENERATED_GESTURE — скрытая (@hide) константа
+        // SDK, в публичном API её нет → компилятор даёт "Unresolved reference".
+        // Объявляем значение сами: система ставит этот флаг (0x10) жестам,
+        // внедрённым через AccessibilityService.dispatchGesture, значение
+        // стабильно начиная с Android 9.
+        private const val FLAG_IS_GENERATED_GESTURE = 0x00000010
+
         // ФИКС: сколько подряд отменённых жестов считаем «жесты блокируются»
         private const val MAX_CONSECUTIVE_CANCELS = 5
 
@@ -142,6 +157,13 @@ class ClickService : AccessibilityService() {
     // Оверлеи
     private var recordOverlay: View? = null
     private var recordParams: WindowManager.LayoutParams? = null
+    // ФИЧА: стоп-кнопка в ОТДЕЛЬНОМ окне — на время живого предпросмотра окно
+    // записи получает FLAG_NOT_TOUCHABLE (чтобы пропускать инжектируемый жест
+    // в приложение), и кнопка «Остановить» обязана оставаться кликабельной
+    private var recordStopBtn: View? = null
+    private var recordStopParams: WindowManager.LayoutParams? = null
+    private val replayRunnable = Runnable { dispatchLiveReplay() }
+    @Volatile private var replayInFlight = false
     private var pickOverlay: View? = null
     // ФИКС (утечка памяти): колбэк захватывает SettingsActivity, а служба
     // живёт дольше окна. Сильную ссылку держит активность (pendingPickCb),
@@ -236,6 +258,8 @@ class ClickService : AccessibilityService() {
             bubble?.let { runCatching { wm.removeView(it) } }
             presetList?.let { runCatching { wm.removeView(it) } }
             recordOverlay?.let { runCatching { wm.removeView(it) } }
+            // ФИЧА: отдельное окно стоп-кнопки оверлея записи — тоже чистим
+            recordStopBtn?.let { runCatching { wm.removeView(it) } }
             pickOverlay?.let { runCatching { wm.removeView(it) } }
             hideMtwsMarkers()
         }
@@ -249,6 +273,7 @@ class ClickService : AccessibilityService() {
         bubble = null; bubbleParams = null; bubbleIcon = null
         presetList = null
         recordOverlay = null; pickOverlay = null
+        recordStopBtn = null; recordStopParams = null
         super.onDestroy()
     }
 
@@ -1358,6 +1383,9 @@ class ClickService : AccessibilityService() {
         recordedActions = mutableListOf()
         lastRecTime = System.currentTimeMillis()
         lastRecordResult = null
+        // ФИЧА: новая сессия записи начинается без хвостов предпросмотра
+        handler.removeCallbacks(replayRunnable)
+        replayInFlight = false
         onRecordDoneRef = WeakReference(onDone)
         if (!showRecordOverlay()) {
             onRecordDoneRef = null
@@ -1378,6 +1406,10 @@ class ClickService : AccessibilityService() {
     fun stopRecordingInternal(bringBackEditor: Boolean = false) {
         if (!recording) return
         recording = false
+        // ФИЧА: снять отложенный предпросмотр; жест, УЖЕ переданный системе,
+        // доиграется в приложении — это безвредно (предпросмотр и так виден)
+        handler.removeCallbacks(replayRunnable)
+        replayInFlight = false
         hideRecordOverlay()
         val result = recordedActions.toList()
         // Страховка: результат переживает уничтожение окна настроек —
@@ -1427,6 +1459,11 @@ class ClickService : AccessibilityService() {
 
         val area = v.findViewById<View>(R.id.recordArea)
         area?.setOnTouchListener { _, e ->
+            // ФИЧА: инжектируемые жесты (наш живой предпросмотр) не записываем
+            // обратно — иначе предпросмотр свайпа запишется как новое действие
+            if (e.flags and FLAG_IS_GENERATED_GESTURE != 0) {
+                return@setOnTouchListener true
+            }
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY
@@ -1448,35 +1485,117 @@ class ClickService : AccessibilityService() {
                         recordedActions[li] = recordedActions[li].copy(delayMs = gap)
                     }
                     lastRecTime = now
-                    if (dist < 40f) {
-                        recordedActions.add(
-                            PresetAction("tap", downX.toInt(), downY.toInt(), 0, 0, 0L, delayMs = 0L)
-                        )
+                    val action = if (dist < 40f) {
+                        PresetAction("tap", downX.toInt(), downY.toInt(), 0, 0, 0L, delayMs = 0L)
                     } else {
-                        recordedActions.add(
-                            PresetAction("swipe",
-                                downX.toInt(), downY.toInt(),
-                                upX.toInt(), upY.toInt(),
-                                dt.coerceIn(50L, 5000L), delayMs = 0L)
-                        )
+                        PresetAction("swipe",
+                            downX.toInt(), downY.toInt(),
+                            upX.toInt(), upY.toInt(),
+                            dt.coerceIn(50L, 5000L), delayMs = 0L)
                     }
+                    recordedActions.add(action)
+                    // ФИЧА: живой предпросмотр — жест тут же выполняется на экране
+                    scheduleLiveReplay(action)
                     true
                 }
                 else -> true
             }
         }
-        // ФИЧА: стоп-кнопка на оверлее останавливает запись и возвращает
-        // окно настроек для редактирования записанных действий
+        // ФИЧА: стоп-кнопка вынесена в отдельное окно — остаётся кликабельной,
+        // пока окно записи переведено в FLAG_NOT_TOUCHABLE для предпросмотра
+        showRecordStopButton()
+        return true
+    }
+
+    /** ФИЧА: отдельное компактное окно стоп-кнопки поверх оверлея записи */
+    private fun showRecordStopButton(): Boolean {
+        if (recordStopBtn != null) return true
+        val p = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(),
+            overlayFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE),
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            y = (48f * resources.displayMetrics.density).toInt()
+        }
+        recordStopParams = p
+        val v = runCatching { LayoutInflater.from(this).inflate(R.layout.record_stop, null) }
+            .getOrElse { Log.e(TAG, "showRecordStopButton: inflate failed", it); return false }
+        recordStopBtn = v
         v.findViewById<View>(R.id.stopRecordBtn)?.setOnClickListener {
             stopRecordingInternal(bringBackEditor = true)
         }
+        if (runCatching { wm.addView(v, p) }.isFailure) {
+            Log.e(TAG, "showRecordStopButton: addView failed")
+            recordStopBtn = null
+            recordStopParams = null
+            return false
+        }
         return true
+    }
+
+    /** ФИЧА: живой предпросмотр — отложить воспроизведение записанного жеста */
+    private fun scheduleLiveReplay(a: PresetAction) {
+        if (replayInFlight) return // не наслаивать предпросмотры друг на друга
+        replayInFlight = true
+        // Прячем окно записи от касаний: иначе инжектируемый жест попадёт
+        // в сам оверлей, а не в приложение под ним
+        setRecordAreaTouchable(false)
+        handler.postDelayed(replayRunnable, REPLAY_DELAY_MS)
+    }
+
+    private fun dispatchLiveReplay() {
+        if (!recording) { restoreRecordArea(); return }
+        val last = recordedActions.lastOrNull()
+        if (last == null) { restoreRecordArea(); return }
+        val g = runCatching { buildReplayGesture(last) }
+            .getOrElse { Log.e(TAG, "buildReplayGesture failed", it); restoreRecordArea(); return }
+        val cb = object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) { restoreRecordArea() }
+            override fun onCancelled(gestureDescription: GestureDescription?) { restoreRecordArea() }
+        }
+        val ok = runCatching { dispatchGesture(g, cb, null) }
+            .getOrElse { Log.e(TAG, "dispatchGesture(replay) error", it); false }
+        if (!ok) restoreRecordArea()
+    }
+
+    private fun restoreRecordArea() {
+        if (recording) setRecordAreaTouchable(true)
+        replayInFlight = false
+    }
+
+    private fun setRecordAreaTouchable(touchable: Boolean) {
+        val v = recordOverlay ?: return
+        val p = recordParams ?: return
+        p.flags = if (touchable)
+            p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        else
+            p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        runCatching { wm.updateViewLayout(v, p) }
+            .onFailure { Log.e(TAG, "setRecordAreaTouchable failed", it) }
+    }
+
+    /** Жест для предпросмотра: точная копия записанного действия (без джиттера —
+     *  пользователь должен видеть, куда реально попадёт клик) */
+    private fun buildReplayGesture(a: PresetAction): GestureDescription {
+        val path = Path().apply {
+            moveTo(a.x1.toFloat(), a.y1.toFloat())
+            if (a.type == "swipe") lineTo(a.x2.toFloat(), a.y2.toFloat())
+        }
+        val dur = if (a.type == "swipe") a.swipeDurationMs.coerceAtLeast(50L) else 50L
+        val stroke = GestureDescription.StrokeDescription(path, 0L, dur)
+        return GestureDescription.Builder().addStroke(stroke).build()
     }
 
     private fun hideRecordOverlay() {
         recordOverlay?.let { runCatching { wm.removeView(it) } }
         recordOverlay = null
         recordParams = null
+        recordStopBtn?.let { runCatching { wm.removeView(it) } }
+        recordStopBtn = null
+        recordStopParams = null
     }
 
     // ============================================================

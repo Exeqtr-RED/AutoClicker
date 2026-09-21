@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Оверлей записи MTWS: затемнённая область перехвата касаний + плашка-статус.
+     ФИЧА: во время записи каждый жест тут же воспроизводится на экране
+     (живой предпросмотр) — список реально скроллится, тапы реально нажимаются.
+     ФИКС: стоп-кнопка вынесена в отдельное окно (record_stop.xml) — на время
+     предпросмотра это окно получает FLAG_NOT_TOUCHABLE. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
@@ -19,24 +24,8 @@
         android:paddingEnd="14dp"
         android:paddingTop="8dp"
         android:paddingBottom="8dp"
-        android:text="● Идёт запись — тапы и свайпы сохраняются"
+        android:text="● Запись: жесты выполняются и сохраняются"
         android:textSize="13sp"
         android:textStyle="bold"
         android:textColor="@color/accent_orange" />
-
-    <TextView
-        android:id="@+id/stopRecordBtn"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="48dp"
-        android:background="@drawable/btn_stop"
-        android:paddingStart="24dp"
-        android:paddingEnd="24dp"
-        android:paddingTop="14dp"
-        android:paddingBottom="14dp"
-        android:text="■  Остановить"
-        android:textSize="15sp"
-        android:textStyle="bold"
-        android:textColor="@color/text_primary" />
 </FrameLayout>

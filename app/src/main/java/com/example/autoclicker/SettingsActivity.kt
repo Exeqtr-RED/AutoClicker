@@ -18,7 +18,11 @@ class SettingsActivity : AppCompatActivity() {
         private const val STATE_PICKED_Y = "pickedY"
         private const val STATE_RECORDED = "recordedActions"
         private const val MIN_DELAY_MS = 20L
-        private const val MAX_DELAY_MS = 60_000L
+        // ФИЧА: потолок поднят с 60 с до суток — общий предел для поля в мс (ST)
+        // и для полей мин+сек у действий MTWS (до 999 мин = 16,6 ч)
+        private const val MAX_DELAY_MS = 24L * 60 * 60_000
+        // ФИЧА: потолок периодичности запуска (минуты+секунды) — сутки
+        private const val MAX_REPEAT_INTERVAL_MS = 24L * 60 * 60_000
     }
 
     private lateinit var mode: String
@@ -29,6 +33,8 @@ class SettingsActivity : AppCompatActivity() {
     private var pickedY = -1
 
     private lateinit var etName: EditText
+    // ST: задержка между кликами в МИЛЛИСЕКУНДАХ (Task 24: пользователь вернул
+    // ST на мс; мин+сек — только в MTWS). В MTWS эта строка скрыта
     private lateinit var etDelay: EditText
     private lateinit var etHours: EditText
     private lateinit var etMinutes: EditText
@@ -42,7 +48,9 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var llDelayRow: View
     private lateinit var llRepeatRow: View
     private lateinit var tvRecCount: TextView
-    private lateinit var etRepeatInterval: EditText
+    // ФИЧА: периодичность запуска MTWS — два поля (минуты и секунды)
+    private lateinit var etRepeatMin: EditText
+    private lateinit var etRepeatSec: EditText
     private lateinit var tvPickedPoint: TextView
     private lateinit var llPresets: LinearLayout
     private lateinit var btnStart: Button
@@ -83,7 +91,8 @@ class SettingsActivity : AppCompatActivity() {
         llDelayRow = findViewById(R.id.llDelayRow)
         llRepeatRow = findViewById(R.id.llRepeatRow)
         tvRecCount = findViewById(R.id.tvRecCount)
-        etRepeatInterval = findViewById(R.id.etRepeatInterval)
+        etRepeatMin = findViewById(R.id.etRepeatMin)
+        etRepeatSec = findViewById(R.id.etRepeatSec)
         tvPickedPoint = findViewById(R.id.tvPickedPoint)
         llPresets = findViewById(R.id.llPresets)
         btnStart = findViewById(R.id.btnStart)
@@ -243,6 +252,9 @@ class SettingsActivity : AppCompatActivity() {
             val tv = TextView(this).apply {
                 text = "Пока нет пресетов"
                 setPadding(16, 16, 16, 16)
+                // ФИКС (Task 25): явный цвет — без него на светлой системной
+                // теме текст получался чёрным на тёмном фоне
+                setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
             }
             llPresets.addView(tv)
             return
@@ -289,7 +301,9 @@ class SettingsActivity : AppCompatActivity() {
         updatePickedPointLabel()
 
         recordedActions = p.actions.toMutableList()
-        etRepeatInterval.setText(p.repeatIntervalMs.toString())
+        // ФИЧА: периодичность хранится в мс, показывается как минуты + секунды
+        etRepeatMin.setText((p.repeatIntervalMs / 60_000L).toString())
+        etRepeatSec.setText(((p.repeatIntervalMs % 60_000L) / 1000L).toString())
         updateRecCount()
         rebuildActionsList()
     }
@@ -337,7 +351,8 @@ class SettingsActivity : AppCompatActivity() {
             return null
         }
 
-        // ФИКС: задержка ограничена — 0 мс превращало воспроизведение в busy-poll
+        // ФИКС: задержка ограничена — 0 мс превращало воспроизведение в busy-poll.
+        // ST: ввод в МИЛЛИСЕКУНДАХ (Task 24 — возвращено по просьбе пользователя)
         val delay = (etDelay.text.toString().toLongOrNull() ?: 100L)
             .coerceIn(MIN_DELAY_MS, MAX_DELAY_MS)
 
@@ -354,10 +369,13 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         // ФИЧА: периодичность запуска (MTWS) — пауза между полными прогонами
-        // пресета. 0 = начинать следующий прогон сразу
-        val repeatIntervalMs = if (mode == "MTWS")
-            (etRepeatInterval.text.toString().toLongOrNull() ?: 0L).coerceIn(0L, MAX_DELAY_MS)
-        else 0L
+        // пресета, вводится как минуты + секунды. 0 = начинать следующий
+        // прогон сразу
+        val repeatIntervalMs = if (mode == "MTWS") {
+            val min = etRepeatMin.text.toString().toLongOrNull() ?: 0L
+            val sec = etRepeatSec.text.toString().toLongOrNull() ?: 0L
+            (min * 60_000L + sec * 1000L).coerceIn(0L, MAX_REPEAT_INTERVAL_MS)
+        } else 0L
 
         // ФИКС: пустой MTWS-пресет нельзя ни запустить, ни сохранить —
         // раньше он сохранялся, а запуск молча ничего не делал
@@ -448,27 +466,59 @@ class SettingsActivity : AppCompatActivity() {
         }
         row.addView(tvDesc)
 
-        val et = EditText(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                dp(72), LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginStart = dp(8) }
-            inputType = InputType.TYPE_CLASS_NUMBER
-            gravity = Gravity.CENTER
-            setText(a.delayMs.toString())
-            textSize = 13f
-            filters = arrayOf(android.text.InputFilter.LengthFilter(6))
-        }
-        row.addView(et)
+        // ФИЧА: индивидуальная задержка действия — два поля (минуты и секунды).
+        // Поля помечены тегами: commitDelaysFromEditors ищет их по тегу,
+        // а не по позиции, поэтому раскладка строки может свободно меняться
+        // ВАЖНО: параметр назван hintText, а не hint — иначе он затеняет
+        // свойство EditText.hint, и «hint = hint» внутри apply даёт
+        // ошибку компиляции "'val' cannot be reassigned"
+        fun delayField(tag: String, hintText: String, maxLen: Int, value: Long): EditText =
+            EditText(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    dp(48), LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { marginStart = dp(8) }
+                inputType = InputType.TYPE_CLASS_NUMBER
+                gravity = Gravity.CENTER
+                hint = hintText
+                setText(value.toString())
+                textSize = 13f
+                filters = arrayOf(android.text.InputFilter.LengthFilter(maxLen))
+                setBackgroundResource(R.drawable.bg_input)
+                setPadding(dp(6), dp(8), dp(6), dp(8))
+                // ФИКС (Task 25): «чёрные цифры на тёмном фоне не видны» —
+                // у программного поля не было явного цвета: при светлой
+                // системной теме Material давал чёрный текст. Теперь текст
+                // и подсказка всегда светлые, независимо от темы системы
+                setTextColor(ContextCompat.getColor(context, R.color.text_primary))
+                setHintTextColor(ContextCompat.getColor(context, R.color.text_hint))
+                this.tag = tag
+            }
 
-        val tvMs = TextView(this).apply {
+        val etMin = delayField("min", "Мин", 3, a.delayMs / 60_000L)
+        row.addView(etMin)
+
+        val tvMin = TextView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { marginStart = dp(4) }
-            text = "мс"
+            text = "мин"
             textSize = 12f
             setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
         }
-        row.addView(tvMs)
+        row.addView(tvMin)
+
+        val etSec = delayField("sec", "Сек", 2, (a.delayMs % 60_000L) / 1000L)
+        row.addView(etSec)
+
+        val tvSec = TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = dp(4); marginEnd = dp(2) }
+            text = "сек"
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
+        }
+        row.addView(tvSec)
 
         val btnDel = TextView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -488,15 +538,18 @@ class SettingsActivity : AppCompatActivity() {
         return row
     }
 
-    /** Коммитит задержки из полей ввода в recordedActions (перед сохранением/запуском) */
+    /** Коммитит задержки из полей ввода в recordedActions (перед сохранением/запуском).
+     *  Поля ищутся по тегам min/sec — привязка к позициям детей не нужна */
     private fun commitDelaysFromEditors() {
         if (mode != "MTWS") return
         val n = minOf(llActions.childCount, recordedActions.size)
         for (i in 0 until n) {
             val row = llActions.getChildAt(i) as? LinearLayout ?: continue
-            if (row.childCount < 2) continue
-            val et = row.getChildAt(1) as? EditText ?: continue
-            val v = et.text.toString().toLongOrNull() ?: continue
+            val etMin = row.findViewWithTag<EditText>("min") ?: continue
+            val etSec = row.findViewWithTag<EditText>("sec") ?: continue
+            val min = etMin.text.toString().toLongOrNull() ?: 0L
+            val sec = etSec.text.toString().toLongOrNull() ?: 0L
+            val v = min * 60_000L + sec * 1000L
             recordedActions[i] = recordedActions[i].copy(delayMs = v.coerceIn(0L, MAX_DELAY_MS))
         }
     }

@@ -1,13 +1,23 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Приложение всегда в тёмной теме: кликеры используют по ночам,
-         яркий светлый фон слепит и отвлекает от контента под оверлеями -->
-    <style name="Base.Theme.AutoClicker" parent="Theme.Material3.DayNight.NoActionBar">
+         яркий светлый фон слепит и отвлекает от контента под оверлеями.
+         ФИКС (Task 25): раньше parent = DayNight — при светлой системной теме
+         Material подставлял СВЕТЛЫЙ вариант, и все поля ввода получали чёрный
+         текст по умолчанию («чёрные цифры на тёмном фоне не видны»).
+         Parent Dark фиксирует тёмные цвета виджетов независимо от системы.
+         Liquid Glass: неоновые акценты (cyan / purple) для системных
+         контролов — свечение переключателей, чекбоксов, курсора, слайдеров -->
+    <style name="Base.Theme.AutoClicker" parent="Theme.Material3.Dark.NoActionBar">
         <!-- Liquid Glass: неоновые акценты (cyan / purple) для системных
              контролов — свечение переключателей, чекбоксов, курсора, слайдеров -->
         <item name="colorPrimary">@color/accent_cyan</item>
         <item name="colorOnPrimary">@color/white</item>
         <item name="colorSecondary">@color/accent_purple</item>
         <item name="colorOnSecondary">@color/white</item>
+        <!-- ФИКС (Task 25): явные цвета текста/хинтов для ВСЕХ полей ввода,
+             включая созданные программно (мин/сек у действий MTWS) -->
+        <item name="android:editTextColor">@color/text_primary</item>
+        <item name="android:textColorHint">@color/text_hint</item>
         <item name="android:windowBackground">@color/screen_bg</item>
         <item name="android:statusBarColor">@color/screen_bg</item>
         <item name="android:navigationBarColor">@color/screen_bg</item>

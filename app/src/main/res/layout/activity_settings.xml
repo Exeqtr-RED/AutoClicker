@@ -279,7 +279,8 @@
                     android:textColor="@color/text_primary" />
             </LinearLayout>
 
-            <!-- Периодичность запуска (только для MTWS): пауза между прогонами пресета -->
+            <!-- Периодичность запуска (только для MTWS): пауза между прогонами пресета.
+                 ФИЧА: два поля — минуты и секунды (вместо одного поля в мс) -->
             <LinearLayout
                 android:id="@+id/llRepeatRow"
                 android:layout_width="match_parent"
@@ -288,20 +289,21 @@
                 android:visibility="gone"
                 android:layout_marginTop="8dp">
 
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/text_secondary"
+                    android:text="Периодичность запуска" />
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="horizontal"
-                    android:gravity="center_vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:textColor="@color/text_secondary"
-                        android:text="Периодичность запуска" />
+                    android:gravity="center_vertical"
+                    android:layout_marginTop="4dp">
 
                     <EditText
-                        android:id="@+id/etRepeatInterval"
+                        android:id="@+id/etRepeatMin"
                         android:background="@drawable/bg_input"
                         android:paddingStart="12dp"
                         android:paddingEnd="12dp"
@@ -310,17 +312,38 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:layout_marginStart="8dp"
                         android:inputType="number"
-                        android:maxLength="6"
-                        android:textColor="@color/text_primary"
-                        android:text="1000" />
+                        android:maxLength="3"
+                        android:hint="Мин"
+                        android:textColor="@color/text_primary" />
 
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:textColor="@color/text_secondary"
-                        android:text="мс"
+                        android:text=" мин "
+                        android:layout_marginStart="4dp" />
+
+                    <EditText
+                        android:id="@+id/etRepeatSec"
+                        android:background="@drawable/bg_input"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:paddingTop="10dp"
+                        android:paddingBottom="10dp"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:inputType="number"
+                        android:maxLength="2"
+                        android:hint="Сек"
+                        android:textColor="@color/text_primary" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/text_secondary"
+                        android:text=" сек "
                         android:layout_marginStart="4dp" />
                 </LinearLayout>
 
@@ -333,7 +356,9 @@
                     android:text="Пауза после завершения всех действий перед повторным запуском пресета" />
             </LinearLayout>
 
-            <!-- Задержка с подписью слева (только для ST: в MTWS задержка задаётся у каждого действия) -->
+            <!-- Задержка с подписью слева (только для ST, в МИЛЛИСЕКУНДАХ — Task 24:
+                 пользователь вернул ST на мс; в MTWS строка скрыта, там задержки
+                 задаются у каждого действия в минутах+секундах) -->
             <LinearLayout
                 android:id="@+id/llDelayRow"
                 android:layout_width="match_parent"

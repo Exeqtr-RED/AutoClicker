@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ФИЧА: отдельное окно стоп-кнопки оверлея записи.
+     Живой предпросмотр записи переводит окно записи (record_overlay.xml)
+     в FLAG_NOT_TOUCHABLE, чтобы инжектируемый жест доходил до приложения.
+     Кнопка «Остановить» живёт в СВОЁМ окне и потому остаётся кликабельной
+     во время предпросмотра. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content">
+
+    <TextView
+        android:id="@+id/stopRecordBtn"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@drawable/btn_stop"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:paddingTop="14dp"
+        android:paddingBottom="14dp"
+        android:text="■  Остановить"
+        android:textSize="15sp"
+        android:textStyle="bold"
+        android:textColor="@color/text_primary" />
+</FrameLayout>
