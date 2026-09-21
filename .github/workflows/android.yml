@@ -1,16 +1,20 @@
 # ФИЧА: автоматическая сборка APK на каждый push + выкладка в Releases по тегам.
 #
 # Как этим пользоваться:
-#  - Любой push в main (и PR) -> workflows собирают debug + release APK,
-#    их можно скачать на вкладке Actions запуска (Artifacts).
+#  - Любой push в main (и PR) -> workflows собирают APK, их можно скачать
+#    на вкладке Actions запуска (Artifacts -> SekiraCliker-apks):
+#      * "Sekira Cliker.apk"  — release (R8-минификация, подписан отладочным
+#        ключом — ставится и обновляется как обычное приложение)
+#      * SekiraCliker-debug.apk — debug (медленнее, крупнее)
 #  - Чтобы опубликовать релиз: git tag v1.1 && git push origin v1.1 ->
-#    workflow создаст GitHub Release с APK внутри и автозаметками.
+#    workflow создаст GitHub Release с "Sekira Cliker.apk" внутри.
 #
-# Примечание: release-APK собирается БЕЗ подписи (unsigned) — установить его
-# напрямую нельзя, используйте debug-APK или настройте подпись секретами:
-#   secrets.KEYSTORE_BASE64 (base64 от .jks) + secrets.KEYSTORE_PASSWORD +
-#   secrets.KEY_ALIAS + secrets.KEY_PASSWORD, затем добавьте signingConfig
-#   в app/build.gradle.kts.
+# Примечание (Task 26): release подписывается отладочным ключом
+# (signingConfig = debug в app/build.gradle.kts, keystore генерируется
+# автоматически) — раньше APK был unsigned и не устанавливался.
+# ВНИМАНИЕ: ключ на CI отличается от ключа на твоём компьютере, поэтому
+# APK из Actions может не встать поверх локально собранного — сначала удали
+# приложение (пресеты при этом сотрутся).
 
 name: Android CI
 
@@ -49,14 +53,22 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon assembleDebug assembleRelease
+        # assembleRelease сам кладёт подписанный release-APK в dist/ с именем
+        # "Sekira Cliker.apk" (см. задачу-копию в app/build.gradle.kts)
+
+      # ФИЧА (Task 26): плоская структура артефакта с понятными именами
+      - name: Collect APKs
+        run: |
+          mkdir -p apks_out
+          cp "dist/Sekira Cliker.apk" apks_out/
+          cp app/build/outputs/apk/debug/app-debug.apk apks_out/SekiraCliker-debug.apk
+          ls -la apks_out
 
       - name: Upload APKs (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: SekiraCliker-apks
-          path: |
-            app/build/outputs/apk/debug/*.apk
-            app/build/outputs/apk/release/*.apk
+          path: apks_out/*
 
       # mapping.txt нужен, чтобы деобфусцировать стек-трейсы release-сборки
       # (включена R8-минификация, см. app/build.gradle.kts)
@@ -84,5 +96,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: apks/*.apk
+          files: "apks/Sekira Cliker.apk"
           generate_release_notes: true
