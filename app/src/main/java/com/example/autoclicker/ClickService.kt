@@ -173,6 +173,8 @@ class ClickService : AccessibilityService() {
     // живёт дольше окна. Сильную ссылку держит активность (pendingPickCb),
     // служба — только WeakReference: уничтоженное окно больше не удерживается
     private var pickOnDoneRef: WeakReference<(Int, Int) -> Unit>? = null
+    // ФИЧА (v13): режим редактора, из которого начали выбор точки (ST/MTWS) —
+    // чтобы после тапа открыть окно настроек с той же вкладкой
     // ФИКС: результат выбора точки переживает пересоздание окна настроек —
     // забирается в SettingsActivity.onResume() через consumePickResult()
     private var lastPickResult: Pair<Int, Int>? = null
@@ -1099,11 +1101,12 @@ class ClickService : AccessibilityService() {
      * Раньше выбор точки во время MTWS-воспроизведения приводил к тому,
      * что hidePickOverlay() возвращал крестик на экран и блокировал жесты.
      */
-    fun startPickPoint(onDone: (Int, Int) -> Unit): Boolean {
+    fun startPickPoint(onDone: (Int, Int) -> Unit, editorMode: String = "ST"): Boolean {
         if (pickOverlay != null) return false
         if (playing || recording) return false
 
         pickOnDoneRef = WeakReference(onDone)
+        pickEditorMode = editorMode
         crosshair?.visibility = View.GONE
         panel?.visibility = View.GONE
         hideMtwsMarkers()
@@ -1144,6 +1147,15 @@ class ClickService : AccessibilityService() {
                     lastPickResult = null
                     cb.invoke(x, y)
                 }
+                // ФИЧА (v13): после тапа ПОДНИМАЕМ окно настроек на передний план.
+                // Раньше это делала сама активность (startActivity из фона) —
+                // современные Android блокируют запуск активити из фона, и
+                // приложение оставалось свёрнутым. Теперь поднимаем ИЗ СЛУЖБЫ —
+                // так же, как при возврате после записи MTWS (bringBackSettingsEditor:
+                // NEW_TASK-флаг, работает на всех прошивках). Если колбэк был жив —
+                // он уже обновил подпись точки; если нет — точку заберёт
+                // SettingsActivity.onResume() через consumePickResult()
+                bringBackSettingsEditor(pickEditorMode)
             }
             true
         }
@@ -1454,13 +1466,16 @@ class ClickService : AccessibilityService() {
         }
     }
 
-    /** ФИЧА: поднять окно настроек (MTWS) после остановки записи */
-    private fun bringBackSettingsEditor() {
+    /** ФИЧА: поднять окно настроек после остановки записи / выбора точки.
+     *  Запуск строго ИЗ КОНТЕКСТА СЛУЖБЫ с NEW_TASK — активити из фона
+     *  поднимать нельзя (ограничения Android 10+), служба с выданным
+     *  SYSTEM_ALERT_WINDOW — можно */
+    private fun bringBackSettingsEditor(mode: String = "MTWS") {
         runCatching {
             val i = Intent(this, SettingsActivity::class.java).apply {
                 // NEW_TASK обязателен: startActivity идёт из контекста службы
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                putExtra("mode", "MTWS")
+                putExtra("mode", mode)
             }
             startActivity(i)
         }.onFailure { Log.e(TAG, "bringBackSettingsEditor: failed", it) }

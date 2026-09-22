@@ -1,6 +1,5 @@
 package com.example.autoclicker
 
-import android.content.Intent
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -251,16 +250,20 @@ class SettingsActivity : AppCompatActivity() {
             pickedY = y
             runOnUiThread {
                 updatePickedPointLabel()
-                val i = Intent(this, SettingsActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                    putExtra("mode", mode)
-                }
-                startActivity(i)
+                // ФИКС (v13): ПОДЪЁМ ОКНА ИЗ КОЛБЭКА УБРАН. Раньше здесь был
+                // startActivity(REORDER_TO_FRONT) — но активность в этот момент
+                // в фоне, и современные Android (10+, особенно MIUI/Samsung)
+                // молча блокируют такой запуск: приложение оставалось свёрнутым,
+                // пресет нельзя было сохранить. Теперь окно поднимает СЛУЖБА
+                // (ClickService.bringBackSettingsEditor — NEW_TASK из контекста
+                // службы с SYSTEM_ALERT_WINDOW, та же рабочая схема, что при
+                // возврате после записи MTWS). Здесь остаётся только обновить
+                // подпись выбранной точки и показать тост
                 toast("Точка: $x, $y")
             }
         }
         pendingPickCb = cb
-        val started = svc.startPickPoint(cb)
+        val started = svc.startPickPoint(cb, mode)
         // ФИКС: честная обратная связь — раньше служба могла молча отказать
         if (!started) {
             toast("Нельзя выбирать точку во время записи/воспроизведения")
