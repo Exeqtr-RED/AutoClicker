@@ -173,8 +173,9 @@ class ClickService : AccessibilityService() {
     // живёт дольше окна. Сильную ссылку держит активность (pendingPickCb),
     // служба — только WeakReference: уничтоженное окно больше не удерживается
     private var pickOnDoneRef: WeakReference<(Int, Int) -> Unit>? = null
-    // ФИЧА (v13): режим редактора, из которого начали выбор точки (ST/MTWS) —
+    // ФИЧА (v14): режим редактора, из которого начали выбор точки (ST/MTWS) —
     // чтобы после тапа открыть окно настроек с той же вкладкой
+    private var pickEditorMode: String = "ST"
     // ФИКС: результат выбора точки переживает пересоздание окна настроек —
     // забирается в SettingsActivity.onResume() через consumePickResult()
     private var lastPickResult: Pair<Int, Int>? = null
@@ -272,6 +273,7 @@ class ClickService : AccessibilityService() {
         // ФИКС (утечка памяти): колбэки и результаты — вместе с окнами
         pickOnDoneRef = null
         onRecordDoneRef = null
+        pickEditorMode = "ST"
         lastPickResult = null
         lastRecordResult = null
         panel = null; crosshair = null
