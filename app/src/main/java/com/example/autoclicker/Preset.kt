@@ -47,6 +47,11 @@ data class Preset(
     val durationSec: Long,
     val cycles: Int,
     val delayMs: Long,
+    // ФИЧА: разброс задержки (мс) для ST — реальная пауза между кликами
+    // выбирается СЛУЧАЙНО из [delayMs − delayJitterMs; delayMs + delayJitterMs].
+    // 0 = разброс выключен (пауза постоянная). Анти-детект: клики не идут
+    // метрономом с фиксированным интервалом
+    val delayJitterMs: Long = 0L,
     // ФИЧА: периодичность запуска пресета (мс) — пауза после завершения
     // всех действий перед повторным прогоном. Для ST-пресетов = 0
     val repeatIntervalMs: Long = 0L,
@@ -59,6 +64,7 @@ data class Preset(
         put("durationSec", durationSec)
         put("cycles", cycles)
         put("delayMs", delayMs)
+        put("delayJitterMs", delayJitterMs)
         put("repeatIntervalMs", repeatIntervalMs)
         val arr = JSONArray()
         actions.forEach { arr.put(it.toJson()) }
@@ -80,6 +86,7 @@ data class Preset(
                 o.optLong("durationSec", 0L),
                 o.optInt("cycles", 1),
                 legacyDelay,
+                o.optLong("delayJitterMs", 0L),
                 o.optLong("repeatIntervalMs", 0L),
                 list
             )

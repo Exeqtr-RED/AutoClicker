@@ -23,6 +23,9 @@ class SettingsActivity : AppCompatActivity() {
         private const val MAX_DELAY_MS = 24L * 60 * 60_000
         // ФИЧА: потолок периодичности запуска (минуты+секунды) — сутки
         private const val MAX_REPEAT_INTERVAL_MS = 24L * 60 * 60_000
+        // ФИЧА: потолок величины разброса задержки ST (мс) — 1 минута.
+        // Разброс больше не имеет смысла: интервал [delay − jitter; delay + jitter]
+        private const val MAX_JITTER_MS = 60_000L
     }
 
     private lateinit var mode: String
@@ -55,6 +58,15 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var llPresets: LinearLayout
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
+    // ФИЧА: разброс задержки ST — чекбокс + поле величины в мс.
+    // Включён → реальная задержка случайно из [delay − jitter; delay + jitter]
+    private lateinit var llJitterRow: View
+    private lateinit var cbJitter: CheckBox
+    private lateinit var etJitter: EditText
+    // ФИЧА: кнопка «Назад» внизу экрана — видна только когда окно
+    // приложения НЕ во весь экран (в полноэкранном режиме системный
+    // жест/кнопка «Назад» доступны, в плавающем окне — нет)
+    private lateinit var btnBack: Button
 
     // ФИКС (утечка памяти): сильные ссылки на колбэки держит АКТИВНОСТЬ,
     // служба хранит только WeakReference. Пока окно живо — колбэк будет
@@ -97,6 +109,10 @@ class SettingsActivity : AppCompatActivity() {
         llPresets = findViewById(R.id.llPresets)
         btnStart = findViewById(R.id.btnStart)
         btnStop = findViewById(R.id.btnStop)
+        llJitterRow = findViewById(R.id.llJitterRow)
+        cbJitter = findViewById(R.id.cbJitter)
+        etJitter = findViewById(R.id.etJitter)
+        btnBack = findViewById(R.id.btnBack)
 
         findViewById<TextView>(R.id.tvTitle).text =
             if (mode == "ST") "Single Target — настройки"
@@ -109,10 +125,14 @@ class SettingsActivity : AppCompatActivity() {
             llRecord.visibility = View.VISIBLE
             llRepeatRow.visibility = View.VISIBLE
             llDelayRow.visibility = View.GONE
+            // ФИЧА: блок «Разброс» — только для ST: в MTWS ритм задаётся
+            // индивидуальными задержками каждого действия
+            llJitterRow.visibility = View.GONE
         } else {
             llRecord.visibility = View.GONE
             llRepeatRow.visibility = View.GONE
             llDelayRow.visibility = View.VISIBLE
+            llJitterRow.visibility = View.VISIBLE
         }
 
         // Кнопка выбора точки и подпись — только для ST
@@ -140,6 +160,12 @@ class SettingsActivity : AppCompatActivity() {
         btnStart.setOnClickListener { startPlayback() }
         btnStop.setOnClickListener { stopPlayback() }
         btnPickPoint.setOnClickListener { pickPoint() }
+
+        // ФИЧА: чекбокс «Разброс» открывает/блокирует поле величины;
+        // «Назад» возвращает в предыдущее меню (главный экран)
+        cbJitter.setOnCheckedChangeListener { _, _ -> updateJitterFieldState() }
+        updateJitterFieldState()
+        btnBack.setOnClickListener { finish() }
 
         refreshPresets()
         updateRecCount()
@@ -171,6 +197,13 @@ class SettingsActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // ФИЧА: видимость кнопки «Назад» пересчитывается при каждом возврате
+        // на экран (пользователь мог развернуть окно на весь экран или,
+        // наоборот, вывести из полноэкранного режима). post{} — ждём
+        // завершения раскладки: сразу после onResume decorView ещё 0×0,
+        // и сравнивать его с экраном рано
+        window.decorView.post { updateBackButtonVisibility() }
+
         // ФИКС: если пользователь выдал разрешение на оверлей, вернувшись из
         // настроек системы, панель и крестик службы появятся сразу,
         // без переподключения службы
@@ -275,6 +308,12 @@ class SettingsActivity : AppCompatActivity() {
     private fun loadPreset(p: Preset) {
         etName.setText(p.name)
         etDelay.setText(p.delayMs.toString())
+        // ФИЧА: восстановление разброса задержки: чекбокс включён, только если
+        // в пресете сохранена ненулевая величина; поле всегда показывает
+        // сохранённое значение (в выключенном состоянии — серое)
+        cbJitter.isChecked = p.delayJitterMs > 0L
+        etJitter.setText(p.delayJitterMs.toString())
+        updateJitterFieldState()
         when (p.timingMode) {
             "INFINITE" -> rgTiming.check(R.id.rbInfinite)
             "DURATION" -> {
@@ -356,6 +395,13 @@ class SettingsActivity : AppCompatActivity() {
         val delay = (etDelay.text.toString().toLongOrNull() ?: 100L)
             .coerceIn(MIN_DELAY_MS, MAX_DELAY_MS)
 
+        // ФИЧА: разброс задержки ST — используется только при включённом
+        // чекбоксе; итоговый интервал [delay − jitter; delay + jitter],
+        // служба дополнительно прижимает нижнюю границу к MIN_DELAY_MS
+        val jitter = if (mode == "ST" && cbJitter.isChecked)
+            (etJitter.text.toString().toLongOrNull() ?: 0L).coerceIn(0L, MAX_JITTER_MS)
+        else 0L
+
         val actions: List<PresetAction> = when {
             mode == "MTWS" -> {
                 // ФИКС: коммитим задержки из полей ввода до сборки пресета —
@@ -391,6 +437,7 @@ class SettingsActivity : AppCompatActivity() {
             durationSec = durationSec,
             cycles = cycles,
             delayMs = delay,
+            delayJitterMs = jitter,
             repeatIntervalMs = repeatIntervalMs,
             actions = actions
         )
@@ -589,6 +636,59 @@ class SettingsActivity : AppCompatActivity() {
         val playing = ClickService.instance?.isPlaying() == true
         btnStart.visibility = if (playing) View.GONE else View.VISIBLE
         btnStop.visibility = if (playing) View.VISIBLE else View.GONE
+    }
+
+    // ---------- Разброс задержки (только ST) ----------
+
+    /** ФИЧА: поле величины разброса активно только при включённом чекбоксе.
+     *  Явные цвета текста (урок Task 25): выключенное поле с системной
+     *  темой Material рисуется чёрным и «исчезает» на тёмном фоне */
+    private fun updateJitterFieldState() {
+        val enabled = cbJitter.isChecked
+        etJitter.isEnabled = enabled
+        etJitter.setTextColor(
+            ContextCompat.getColor(
+                this,
+                if (enabled) R.color.text_primary else R.color.text_hint
+            )
+        )
+        etJitter.alpha = if (enabled) 1f else 0.55f
+    }
+
+    // ---------- Кнопка «Назад» (видна только не во весь экран) ----------
+
+    /** ФИЧА: кнопка «Назад» нужна там, где системного «Назада» может не быть
+     *  (плавающее окно, сплит-скрин, эмуляторы). В полноэкранном режиме —
+     *  скрыта, чтобы не занимать место */
+    private fun updateBackButtonVisibility() {
+        btnBack.visibility = if (isWindowFullscreen()) View.GONE else View.VISIBLE
+    }
+
+    /** Окно считается полноэкранным, если закрывает ≥90% ширины и ≥85% высоты
+     *  физического экрана (запас на статус-бар и панель навигации).
+     *  Ошибка определения трактуется как «во весь экран» — кнопка не мешает */
+    private fun isWindowFullscreen(): Boolean {
+        return try {
+            val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
+            val realW: Int
+            val realH: Int
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                val b = wm.maximumWindowMetrics.bounds
+                realW = b.width()
+                realH = b.height()
+            } else {
+                @Suppress("DEPRECATION")
+                val m = android.util.DisplayMetrics()
+                @Suppress("DEPRECATION")
+                wm.defaultDisplay.getRealMetrics(m)
+                realW = m.widthPixels
+                realH = m.heightPixels
+            }
+            window.decorView.width >= realW * 0.9f &&
+                    window.decorView.height >= realH * 0.85f
+        } catch (e: Exception) {
+            true
+        }
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()

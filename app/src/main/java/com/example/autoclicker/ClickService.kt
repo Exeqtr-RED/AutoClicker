@@ -1287,8 +1287,13 @@ class ClickService : AccessibilityService() {
                 cycleCount++
                 updateCounter()
                 // ФИКС: задержка ограничена снизу — пресет с delay=0 больше не
-                // превращает цикл в busy-poll
-                handler.postDelayed(this, preset.delayMs.coerceAtLeast(MIN_DELAY_MS))
+                // превращает цикл в busy-poll.
+                // ФИЧА: разброс — реальная пауза выбирается случайно из
+                // [delay − jitter; delay + jitter] (анти-детект: клики
+                // не идут метрономом с фиксированным интервалом)
+                handler.postDelayed(this, stDelayWithJitter(
+                    preset.delayMs, preset.delayJitterMs
+                ).coerceAtLeast(MIN_DELAY_MS))
             } else {
                 if (preset.actions.isEmpty()) { stopPlayback(); return }
                 if (actionIndex >= preset.actions.size) {
@@ -1331,6 +1336,18 @@ class ClickService : AccessibilityService() {
             v + Random.nextInt(-RANDOM_OFFSET_PX, RANDOM_OFFSET_PX + 1)
         else
             v
+
+    /** ФИЧА: пауза ST со случайным разбросом ±jitterMs (включается чекбоксом
+     *  «Разброс» в настройках Single Target). Равномерный выбор из
+     *  [delayMs − jitterMs; delayMs + jitterMs]; при jitterMs <= 0 пауза
+     *  постоянная. Нижняя граница прижата к MIN_DELAY_MS, чтобы разброс
+     *  больше задержки не мог дать нулевую/отрицательную паузу */
+    private fun stDelayWithJitter(delayMs: Long, jitterMs: Long): Long {
+        if (jitterMs <= 0L) return delayMs
+        val lo = (delayMs - jitterMs).coerceAtLeast(MIN_DELAY_MS)
+        val hi = delayMs + jitterMs
+        return if (hi <= lo) lo else Random.nextLong(lo, hi + 1L)
+    }
 
     private fun performTap(x: Float, y: Float) {
         // ФИЧА: случайный сдвиг — клики не ложатся пиксель-в-пиксель
