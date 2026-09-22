@@ -19,7 +19,7 @@ class SettingsActivity : AppCompatActivity() {
         private const val STATE_RECORDED = "recordedActions"
         private const val MIN_DELAY_MS = 20L
         // ФИЧА: потолок поднят с 60 с до суток — общий предел для поля в мс (ST)
-        // и для полей мин+сек у действий MTWS (до 999 мин = 16,6 ч)
+        // и для полей мин+сек у действий MTWS (до 1440 мин = 24 ч)
         private const val MAX_DELAY_MS = 24L * 60 * 60_000
         // ФИЧА: потолок периодичности запуска (минуты+секунды) — сутки
         private const val MAX_REPEAT_INTERVAL_MS = 24L * 60 * 60_000
@@ -541,7 +541,9 @@ class SettingsActivity : AppCompatActivity() {
                 this.tag = tag
             }
 
-        val etMin = delayField("min", "Мин", 3, a.delayMs / 60_000L)
+        // v13: maxLen=4 у «Мин» — сутки = 1440 мин не влезают в 3 цифры;
+        // иначе записанная длинная пауза при показе обрезалась до 999
+        val etMin = delayField("min", "Мин", 4, a.delayMs / 60_000L)
         row.addView(etMin)
 
         val tvMin = TextView(this).apply {

@@ -324,7 +324,7 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:inputType="number"
-                        android:maxLength="3"
+                        android:maxLength="4"
                         android:hint="Мин"
                         android:textColor="@color/text_primary" />
 
