@@ -83,6 +83,12 @@ class SettingsActivity : AppCompatActivity() {
     // ФИКС (v20): ждёт страховочного восстановления оконного режима после
     // возврата из pick/записи (см. restoreWindowedGeometryIfNeeded)
     private var pendingGeomRestore = false
+    // ФИКС (v22): ОДНА попытка перезапуска с границами на сессию возврата —
+    // защита от цикла «перезапуск -> onResume -> снова перезапуск».
+    // Сбрасывается в scheduleGeomRestore() при каждом НОВОМ возврате
+    // (из pick/записи): consume-результат к тому времени пуст, поэтому
+    // onResume после перезапуска scheduleGeomRestore не вызывает
+    private var geomReboundDone = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -598,32 +604,65 @@ class SettingsActivity : AppCompatActivity() {
      *  (ActivityOptions.setLaunchBounds), но часть прошивок (MIUI/HyperOS
      *  «свободные окна») их молча игнорирует и распахивает окно на весь
      *  экран. post{} — как у updateBackButtonVisibility: сразу после
-     *  onResume decorView ещё не разложен, мерить рано */
+     *  onResume decorView ещё не разложен, мерить рано.
+     *  ФИКС (v22): каждая новая сессия возврата получает ОДНУ свежую
+     *  попытку перезапуска (флаг сбрасывается здесь) */
     private fun scheduleGeomRestore() {
         pendingGeomRestore = true
+        geomReboundDone = false
         window.decorView.post { restoreWindowedGeometryIfNeeded() }
     }
 
-    /** ФИКС (v20): шаг 2 — применяется ОДИН раз после возврата из pick/записи.
-     *  Если окно уже оконное (setLaunchBounds сработал) — не мешаем; если
-     *  преф win_geom говорит «было во весь экран» (ключа нет) — тоже.
-     *  Иначе принудительно возвращаем размер и позицию окна атрибутами:
-     *  gravity TOP|START делает x/y абсолютными координатами экрана,
-     *  setLayout задаёт размер. На прошивках, где это не работает, окно
-     *  останется fullscreen — как до v20 (поведение не ухудшается) */
+    /** ФИКС (v20→v22): шаг 2 — применяется ОДИН раз после возврата из
+     *  pick/записи. Если окно уже оконное (setLaunchBounds сработал) —
+     *  не мешаем; если преф win_geom говорит «было во весь экран» (ключа
+     *  нет) — тоже. Иначе просим СЛУЖБУ перезапустить редактор с
+     *  сохранёнными границами (ClickService.reboundEditorWindow).
+     *  ФИКС (v22): прежняя страховка правила окно напрямую —
+     *  window.setLayout + gravity TOP|START + x/y. На прошивках с
+     *  «неосведомлённым» freeform (MIUI/HyperOS: активность размечена в
+     *  координатах всего экрана, система масштабирует её в окно) это
+     *  ломало рендер — в окне оставалась часть приложения, остальное
+     *  было белым. Перезапуск с setLaunchBounds — тот же путь, что и
+     *  после pick: рендер не трогаем, окно раскладывает система.
+     *  Прошивка, игнорирующая bounds на перезапуске, оставит окно во
+     *  весь экран — как до v20 (не хуже). Живое окно получит onNewIntent
+     *  без пересоздания — введённые поля не пропадут */
     private fun restoreWindowedGeometryIfNeeded() {
         if (!pendingGeomRestore) return
         pendingGeomRestore = false
         if (!isWindowFullscreen()) return
         val g = readSavedWinGeom() ?: return
-        runCatching {
-            val lp = window.attributes
-            lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
-            lp.x = g.left
-            lp.y = g.top
-            window.attributes = lp
-            window.setLayout(g.width(), g.height())
-        }
+        // ФИКС (v22): границы, снятые на «неосведомлённом» freeform, могут
+        // совпадать со всем экраном — такой перезапуск бессмыслен
+        if (isNearlyFullscreenBounds(g)) return
+        val svc = ClickService.instance ?: return
+        if (geomReboundDone) return
+        geomReboundDone = true
+        svc.reboundEditorWindow(g, mode)
+    }
+
+    /** ФИКС (v22): сохранённые границы почти совпадают с целым экраном —
+     *  считаем их устаревшими (сняты в полноэкранном состоянии или на
+     *  «неосведомлённом» freeform) и не перезапускаем. Пороги те же, что
+     *  в isWindowFullscreen: >=90% ширины и >=85% высоты */
+    private fun isNearlyFullscreenBounds(g: android.graphics.Rect): Boolean {
+        return runCatching {
+            val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
+            val realW: Int
+            val realH: Int
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                val b = wm.maximumWindowMetrics.bounds
+                realW = b.width(); realH = b.height()
+            } else {
+                @Suppress("DEPRECATION")
+                val m = android.util.DisplayMetrics()
+                @Suppress("DEPRECATION")
+                wm.defaultDisplay.getRealMetrics(m)
+                realW = m.widthPixels; realH = m.heightPixels
+            }
+            g.width() >= realW * 0.9f && g.height() >= realH * 0.85f
+        }.getOrDefault(false)
     }
 
     /** ФИКС (v20): читает сохранённые границы win_geom ("l,t,r,b") из префов

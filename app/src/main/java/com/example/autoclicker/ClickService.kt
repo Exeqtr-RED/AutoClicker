@@ -113,7 +113,6 @@ class ClickService : AccessibilityService() {
 
     // Панель
     private var panel: View? = null
-    private var panelParams: WindowManager.LayoutParams? = null
     private var tvStatus: TextView? = null
     private var toggleBtn: ImageButton? = null
 
@@ -147,7 +146,6 @@ class ClickService : AccessibilityService() {
 
     // ФИЧА: пузырь — панель, свёрнутая в круглую кнопку (как Assistive Touch)
     private var bubble: View? = null
-    private var bubbleParams: WindowManager.LayoutParams? = null
     private var bubbleIcon: ImageView? = null
 
     // ФИЧА: пауза воспроизведения (прогресс циклов не сбрасывается)
@@ -168,7 +166,6 @@ class ClickService : AccessibilityService() {
     // записи получает FLAG_NOT_TOUCHABLE (чтобы пропускать инжектируемый жест
     // в приложение), и кнопка «Остановить» обязана оставаться кликабельной
     private var recordStopBtn: View? = null
-    private var recordStopParams: WindowManager.LayoutParams? = null
     private val replayRunnable = Runnable { dispatchLiveReplay() }
     @Volatile private var replayInFlight = false
     private var pickOverlay: View? = null
@@ -287,15 +284,14 @@ class ClickService : AccessibilityService() {
         lastRecordResult = null
         panel = null; crosshair = null
         clickMarker = null; clickMarkerParams = null
-        bubble = null; bubbleParams = null; bubbleIcon = null
+        bubble = null; bubbleIcon = null
         presetList = null
         recordOverlay = null; pickOverlay = null
-        recordStopBtn = null; recordStopParams = null
+        recordStopBtn = null
         super.onDestroy()
     }
 
     fun isPlaying(): Boolean = playing
-    fun isRecording(): Boolean = recording
 
     /**
      * ФИКС (утечка + потеря данных): результаты записи и выбора точки
@@ -396,9 +392,8 @@ class ClickService : AccessibilityService() {
             x = 40
             y = 200
         }
-        panelParams = p
-        // ФИКС (краш службы «keeps stopping»): ошибка inflate больше не роняет
-        // процесс — пишем в лог и работаем без этого оверлея
+        // ФИКС (v22): поле panelParams было «только запись» — layoutParams
+        // панели и так живёт в WindowManager; локальная p используется ниже
         val v = runCatching { LayoutInflater.from(this).inflate(R.layout.panel, null) }
             .getOrElse { Log.e(TAG, "showPanel: inflate failed", it); return }
         panel = v
@@ -767,7 +762,6 @@ class ClickService : AccessibilityService() {
             x = 48
             y = 200
         }
-        bubbleParams = p
         val v = runCatching { LayoutInflater.from(this).inflate(R.layout.bubble, null) }
             .getOrElse { Log.e(TAG, "showBubble: inflate failed", it); return }
         bubble = v
@@ -775,7 +769,6 @@ class ClickService : AccessibilityService() {
         if (runCatching { wm.addView(v, p) }.isFailure) {
             Log.e(TAG, "showBubble: addView failed")
             bubble = null
-            bubbleParams = null
             bubbleIcon = null
             return
         }
@@ -821,7 +814,6 @@ class ClickService : AccessibilityService() {
     private fun hideBubble() {
         bubble?.let { runCatching { wm.removeView(it) } }
         bubble = null
-        bubbleParams = null
         bubbleIcon = null
     }
 
@@ -1172,7 +1164,9 @@ class ClickService : AccessibilityService() {
             Log.e(TAG, "startPickPoint: addView failed")
             pickOverlay = null
             pickOnDoneRef = null
-            crosshair?.visibility = View.VISIBLE
+            // ФИКС (v22): помощников возвращаем с учётом кнопки ⊘ — раньше
+            // крестик появлялся даже при скрытых через панель помощниках
+            if (!crosshairHidden) crosshair?.visibility = View.VISIBLE
             panel?.visibility = View.VISIBLE
             refreshMtwsMarkers()
             return false
@@ -1635,6 +1629,27 @@ class ClickService : AccessibilityService() {
         return true
     }
 
+    /** ФИКС (v22): безопасная страховка оконного режима. Активность сообщает,
+     *  что вернулась во весь экран, хотя до сворачивания была оконной, —
+     *  служба ПЕРЕЗАПУСКАЕТ редактор с сохранёнными границами (тот же
+     *  проверенный путь, что и после pick: NEW_TASK|REORDER_TO_FRONT +
+     *  setLaunchBounds). Живое окно получит onNewIntent БЕЗ пересоздания
+     *  (все введённые поля сохраняются), уничтоженное — создастся заново
+     *  и вернёт черновик. Раньше (v20) активность сама правила окно через
+     *  window.setLayout + gravity — на прошивках с «неосведомлённым»
+     *  freeform (MIUI/HyperOS раскладывают активность в координатах всего
+     *  экрана и масштабируют её в окно) это ломало рендер: в окне было
+     *  видно только часть приложения, остальное — белое. Перезапуск же
+     *  ничего не ломает: прошивка, игнорирующая bounds, просто оставит
+     *  окно во весь экран (поведение до v20, не хуже) */
+    fun reboundEditorWindow(bounds: Rect, mode: String) {
+        runCatching {
+            val opts = ActivityOptions.makeBasic()
+            opts.setLaunchBounds(bounds)
+            startActivity(editorIntent(mode), opts.toBundle())
+        }.onFailure { Log.e(TAG, "reboundEditorWindow failed", it) }
+    }
+
     /** ФИКС (v18): поднять задачу как есть — из недавних так сохраняется
      *  и оконный режим, и размер окна. Ошибка (задачи нет / отказ ОС)
      *  вернёт false — вызывающий уйдёт в fallback через startActivity */
@@ -1726,7 +1741,6 @@ class ClickService : AccessibilityService() {
             gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
             y = (48f * resources.displayMetrics.density).toInt()
         }
-        recordStopParams = p
         val v = runCatching { LayoutInflater.from(this).inflate(R.layout.record_stop, null) }
             .getOrElse { Log.e(TAG, "showRecordStopButton: inflate failed", it); return false }
         recordStopBtn = v
@@ -1736,7 +1750,6 @@ class ClickService : AccessibilityService() {
         if (runCatching { wm.addView(v, p) }.isFailure) {
             Log.e(TAG, "showRecordStopButton: addView failed")
             recordStopBtn = null
-            recordStopParams = null
             return false
         }
         return true
@@ -1801,7 +1814,6 @@ class ClickService : AccessibilityService() {
         recordParams = null
         recordStopBtn?.let { runCatching { wm.removeView(it) } }
         recordStopBtn = null
-        recordStopParams = null
     }
 
     // ============================================================

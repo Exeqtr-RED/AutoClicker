@@ -3,18 +3,27 @@
 # Как этим пользоваться:
 #  - Любой push в main (и PR) -> workflows собирают APK, их можно скачать
 #    на вкладке Actions запуска (Artifacts -> Sekira Cliker APK):
-#      * "Sekira Cliker.apk"  — release (R8-минификация, подписан
+#      * "Sekira_Cliker.apk"  — release (R8-минификация, подписан
 #        фиксированным ключом — ставится и обновляется как обычное приложение)
-#      * "Sekira Cliker debug.apk" — debug (медленнее, крупнее)
-#  - Чтобы опубликовать релиз: git tag v1.1 && git push origin v1.1 ->
-#    workflow создаст GitHub Release с "Sekira Cliker.apk" внутри.
+#      * "Sekira_Cliker_debug.apk" — debug (медленнее, крупнее)
+#  - Чтобы опубликовать релиз: git tag v1.3 && git push origin v1.3 ->
+#    workflow создаст GitHub Release с "Sekira_Cliker.apk" внутри.
+#
+# ФИКС (v21) в имени РЕЛИЗНОГО APK: "Sekira_Cliker.apk" - ЧЕРЕЗ ПОДЧЁРКИВАНИЕ.
+# Причина: страница релиза показывала "Sekira Cliker.apk", но скачивался файл
+# "Sekira.Cliker.apk" (с точками). Это НЕ ошибка воркфлоу: GitHub сам
+# заменяет ПРОБЕЛЫ на ТОЧКИ в имени скачанного файла - и в ссылке
+# (releases/download/...), и в заголовке content-disposition (проверено
+# curl -I). Имя с пробелом из Releases получить НЕЛЬЗЯ В ПРИНЦИПЕ.
+# Подчёркивание GitHub не заменяет - файл скачивается ровно как
+# "Sekira_Cliker.apk": то, что видно на странице, то и придёт.
+# Имя приложения на телефоне это НЕ меняет (strings.xml: "Sekira Cliker").
 #
 # ФИКС (v20) в именах: раньше артефакты назывались слитно, без пробела —
-# выглядело как "Sekira.Cliker". Теперь все
-# имена — только через пробел: "Sekira Cliker APK", "Sekira Cliker mapping",
-# "Sekira Cliker.apk", "Sekira Cliker debug.apk". Плюс страховочное
-# копирование: если задача copyReleaseApk не отработала, APK берётся
-# напрямую из app/build/outputs/apk/release/
+# выглядело как "Sekira.Cliker". Теперь артефакты — через пробел:
+# "Sekira Cliker APK" и "Sekira Cliker mapping" (имена ЗИП-ов, GitHub их
+# не искажает). Плюс страховочное копирование: если задача copyReleaseApk
+# не отработала, APK берётся напрямую из app/build/outputs/apk/release/
 #
 # Примечание (v19): release и debug подписываются ФИКСИРОВАННЫМ ключом
 # из репозитория (keystore/sekira.keystore, signingConfigs "sekira" в
@@ -68,16 +77,19 @@ jobs:
 
       # ФИЧА (Task 26): плоская структура артефакта с понятными именами
       # ФИКС (v20): страховка — если copyReleaseApk не дал dist-файл,
-      # берём release-APK напрямую из outputs (имя результата то же)
+      # берём release-APK напрямую из outputs
+      # ФИКС (v21): имена APK-ФАЙЛОВ — через подчёркивание "Sekira_Cliker.apk":
+      # GitHub при скачивании из Releases заменяет пробелы в имени файла на
+      # точки, подчёркивание оставляет как есть (см. комментарий в шапке)
       - name: Collect APKs
         run: |
           mkdir -p apks_out
           if [ -f "dist/Sekira Cliker.apk" ]; then
-            cp "dist/Sekira Cliker.apk" apks_out/
+            cp "dist/Sekira Cliker.apk" "apks_out/Sekira_Cliker.apk"
           else
-            cp app/build/outputs/apk/release/app-release.apk "apks_out/Sekira Cliker.apk"
+            cp app/build/outputs/apk/release/app-release.apk "apks_out/Sekira_Cliker.apk"
           fi
-          cp app/build/outputs/apk/debug/app-debug.apk "apks_out/Sekira Cliker debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "apks_out/Sekira_Cliker_debug.apk"
           ls -la apks_out
 
       - name: Upload APKs (artifact)
@@ -112,5 +124,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: "apks/Sekira Cliker.apk"
+          files: "apks/Sekira_Cliker.apk"
           generate_release_notes: true
