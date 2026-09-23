@@ -2,12 +2,19 @@
 #
 # Как этим пользоваться:
 #  - Любой push в main (и PR) -> workflows собирают APK, их можно скачать
-#    на вкладке Actions запуска (Artifacts -> SekiraCliker-apks):
+#    на вкладке Actions запуска (Artifacts -> Sekira Cliker APK):
 #      * "Sekira Cliker.apk"  — release (R8-минификация, подписан
 #        фиксированным ключом — ставится и обновляется как обычное приложение)
-#      * SekiraCliker-debug.apk — debug (медленнее, крупнее)
+#      * "Sekira Cliker debug.apk" — debug (медленнее, крупнее)
 #  - Чтобы опубликовать релиз: git tag v1.1 && git push origin v1.1 ->
 #    workflow создаст GitHub Release с "Sekira Cliker.apk" внутри.
+#
+# ФИКС (v20) в именах: раньше артефакты назывались слитно, без пробела —
+# выглядело как "Sekira.Cliker". Теперь все
+# имена — только через пробел: "Sekira Cliker APK", "Sekira Cliker mapping",
+# "Sekira Cliker.apk", "Sekira Cliker debug.apk". Плюс страховочное
+# копирование: если задача copyReleaseApk не отработала, APK берётся
+# напрямую из app/build/outputs/apk/release/
 #
 # Примечание (v19): release и debug подписываются ФИКСИРОВАННЫМ ключом
 # из репозитория (keystore/sekira.keystore, signingConfigs "sekira" в
@@ -60,17 +67,23 @@ jobs:
         # "Sekira Cliker.apk" (см. задачу-копию в app/build.gradle.kts)
 
       # ФИЧА (Task 26): плоская структура артефакта с понятными именами
+      # ФИКС (v20): страховка — если copyReleaseApk не дал dist-файл,
+      # берём release-APK напрямую из outputs (имя результата то же)
       - name: Collect APKs
         run: |
           mkdir -p apks_out
-          cp "dist/Sekira Cliker.apk" apks_out/
-          cp app/build/outputs/apk/debug/app-debug.apk apks_out/SekiraCliker-debug.apk
+          if [ -f "dist/Sekira Cliker.apk" ]; then
+            cp "dist/Sekira Cliker.apk" apks_out/
+          else
+            cp app/build/outputs/apk/release/app-release.apk "apks_out/Sekira Cliker.apk"
+          fi
+          cp app/build/outputs/apk/debug/app-debug.apk "apks_out/Sekira Cliker debug.apk"
           ls -la apks_out
 
       - name: Upload APKs (artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: SekiraCliker-apks
+          name: Sekira Cliker APK
           path: apks_out/*
 
       # mapping.txt нужен, чтобы деобфусцировать стек-трейсы release-сборки
@@ -78,7 +91,7 @@ jobs:
       - name: Upload R8 mapping (artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: SekiraCliker-mapping
+          name: Sekira Cliker mapping
           path: app/build/outputs/mapping/release/mapping.txt
           if-no-files-found: ignore
 
@@ -93,7 +106,7 @@ jobs:
       - name: Download built APKs
         uses: actions/download-artifact@v4
         with:
-          name: SekiraCliker-apks
+          name: Sekira Cliker APK
           path: apks
 
       - name: Create GitHub Release

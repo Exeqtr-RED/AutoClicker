@@ -80,6 +80,9 @@ class SettingsActivity : AppCompatActivity() {
     // не удерживается службой
     private var pendingPickCb: ((Int, Int) -> Unit)? = null
     private var pendingRecordCb: ((List<PresetAction>) -> Unit)? = null
+    // ФИКС (v20): ждёт страховочного восстановления оконного режима после
+    // возврата из pick/записи (см. restoreWindowedGeometryIfNeeded)
+    private var pendingGeomRestore = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -227,12 +230,16 @@ class SettingsActivity : AppCompatActivity() {
             pickedY = y
             updatePickedPointLabel()
             toast("Точка: $x, $y")
+            // ФИКС (v20): страховочное восстановление оконного режима
+            scheduleGeomRestore()
         }
         ClickService.instance?.consumeRecordResult()?.let { actions ->
             recordedActions = actions.toMutableList()
             updateRecCount()
             rebuildActionsList()
             toast("Записано: ${actions.size} — отредактируйте задержки")
+            // ФИКС (v20): то же для возврата после записи
+            scheduleGeomRestore()
         }
         syncPlaybackState()
     }
@@ -584,6 +591,59 @@ class SettingsActivity : AppCompatActivity() {
             getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE)
                 .edit().remove(draftKey()).remove("win_geom").commit()
         }
+    }
+
+    /** ФИКС (v20): страховка восстановления оконного режима, шаг 1.
+     *  Служба поднимает редактор с сохранёнными границами
+     *  (ActivityOptions.setLaunchBounds), но часть прошивок (MIUI/HyperOS
+     *  «свободные окна») их молча игнорирует и распахивает окно на весь
+     *  экран. post{} — как у updateBackButtonVisibility: сразу после
+     *  onResume decorView ещё не разложен, мерить рано */
+    private fun scheduleGeomRestore() {
+        pendingGeomRestore = true
+        window.decorView.post { restoreWindowedGeometryIfNeeded() }
+    }
+
+    /** ФИКС (v20): шаг 2 — применяется ОДИН раз после возврата из pick/записи.
+     *  Если окно уже оконное (setLaunchBounds сработал) — не мешаем; если
+     *  преф win_geom говорит «было во весь экран» (ключа нет) — тоже.
+     *  Иначе принудительно возвращаем размер и позицию окна атрибутами:
+     *  gravity TOP|START делает x/y абсолютными координатами экрана,
+     *  setLayout задаёт размер. На прошивках, где это не работает, окно
+     *  останется fullscreen — как до v20 (поведение не ухудшается) */
+    private fun restoreWindowedGeometryIfNeeded() {
+        if (!pendingGeomRestore) return
+        pendingGeomRestore = false
+        if (!isWindowFullscreen()) return
+        val g = readSavedWinGeom() ?: return
+        runCatching {
+            val lp = window.attributes
+            lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+            lp.x = g.left
+            lp.y = g.top
+            window.attributes = lp
+            window.setLayout(g.width(), g.height())
+        }
+    }
+
+    /** ФИКС (v20): читает сохранённые границы win_geom ("l,t,r,b") из префов
+     *  черновика (те же, что пишет writeDraft и читает ClickService).
+     *  null — окно было во весь экран (ключа нет) или значение битое.
+     *  Формат и порог 100×100 совпадают с ClickService.readEditorWindowGeometry */
+    private fun readSavedWinGeom(): android.graphics.Rect? {
+        return runCatching {
+            val s = getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE)
+                .getString("win_geom", null) ?: return null
+            val p = s.split(',')
+            if (p.size != 4) return null
+            val r = android.graphics.Rect(
+                p[0].trim().toIntOrNull() ?: return null,
+                p[1].trim().toIntOrNull() ?: return null,
+                p[2].trim().toIntOrNull() ?: return null,
+                p[3].trim().toIntOrNull() ?: return null
+            )
+            if (r.width() < 100 || r.height() < 100) null else r
+        }.getOrNull()
     }
 
     /** ФИКС (v19): подготовленное значение для префа win_geom.

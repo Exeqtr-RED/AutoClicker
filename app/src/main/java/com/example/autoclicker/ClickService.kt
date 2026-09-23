@@ -1182,7 +1182,9 @@ class ClickService : AccessibilityService() {
             if (e.action == MotionEvent.ACTION_UP) {
                 val x = e.rawX.toInt()
                 val y = e.rawY.toInt()
-                hidePickOverlay()
+                // ФИКС (v20): координаты передаются в hidePickOverlay —
+                // прицел встанет на ВЫБРАННУЮ точку, а не на старую
+                hidePickOverlay(x, y)
                 // Сначала результат — в страховочное хранилище: если живой
                 // получатель не найдётся (окно уничтожено), его заберёт
                 // SettingsActivity.onResume() и выбор точки не потеряется
@@ -1208,15 +1210,48 @@ class ClickService : AccessibilityService() {
         return true
     }
 
-    private fun hidePickOverlay() {
+    private fun hidePickOverlay(pickedX: Int = Int.MIN_VALUE, pickedY: Int = Int.MIN_VALUE) {
         pickOverlay?.let { runCatching { wm.removeView(it) } }
         pickOverlay = null
         panel?.visibility = View.VISIBLE
         // ФИКС: крестик возвращаем только вне playback.
         // Во время ST-воспроизведения крестика вообще нет (removeView),
         // во время MTWS он должен остаться скрытым.
-        if (!playing) crosshair?.visibility = View.VISIBLE
+        // ФИКС (v20): раньше крестик безусловно всплывал на СТАРОМ месте
+        // (точка прежнего пресета или дефолт) — при настройке нового пресета
+        // это вводило в заблуждение. Теперь:
+        //  — ST: прицел встаёт на ВЫБРАННУЮ точку (подсказка «там появится
+        //    прицел» больше не врёт); кнопка ⊘ уважается — при скрытых
+        //    помощниках прицел не создаётся и не возвращается;
+        //  — MT: крестик не возвращаем — его роль играют нумерованные
+        //    точки, их вернёт refreshMtwsMarkers() ниже.
+        if (!playing && !crosshairHidden && pickEditorMode == "ST" &&
+            pickedX != Int.MIN_VALUE && pickedY != Int.MIN_VALUE
+        ) {
+            moveCrosshairTo(pickedX.toFloat(), pickedY.toFloat())
+        } else if (!playing && pickEditorMode == "ST") {
+            crosshair?.visibility = View.VISIBLE
+        }
         refreshMtwsMarkers()
+    }
+
+    /** ФИКС (v20): ставит крестик центром в точку (x, y). Если окна крестика
+     *  нет — создаёт его (showCrosshair читает crosshairCenterX/Y); если
+     *  есть — переставляет через updateViewLayout */
+    private fun moveCrosshairTo(x: Float, y: Float) {
+        crosshairCenterX = x
+        crosshairCenterY = y
+        val v = crosshair
+        val p = crosshairParams
+        if (v == null || p == null) {
+            showCrosshair()
+            return
+        }
+        val half = 24f * resources.displayMetrics.density
+        p.x = (x - half).toInt()
+        p.y = (y - half).toInt()
+        runCatching { wm.updateViewLayout(v, p) }
+        v.visibility = View.VISIBLE
     }
 
     // ============================================================
