@@ -28,6 +28,10 @@
             android:textSize="16sp"
             android:textColor="@color/text_secondary" />
 
+        <!-- ФИКС (v23): серый по умолчанию (простой). Раньше стоял красный —
+             цвет читался как «идёт запись». Реальный цвет всегда задаёт
+             служба (updatePanelState): запись = красный, работа = зелёный,
+             пауза = оранжевый, простой = серый -->
         <TextView
             android:id="@+id/tvStatus"
             android:layout_width="wrap_content"
@@ -35,7 +39,7 @@
             android:layout_marginStart="8dp"
             android:text="●"
             android:textSize="16sp"
-            android:textColor="#FFFF2222" />
+            android:textColor="#FF9E9E9E" />
 
         <TextView
             android:id="@+id/tvCounter"

@@ -50,6 +50,12 @@ class ClickService : AccessibilityService() {
         private const val STATE_PREFS = "service_state"
         private const val KEY_LAST_PRESET = "last_preset"
         private const val KEY_CROSSHAIR_HIDDEN = "crosshair_hidden"
+        // ФИЧА (v23): панель и пузырь запоминают позицию — переживают
+        // рестарт службы и сворачивание/разворачивание
+        private const val KEY_PANEL_X = "panel_x"
+        private const val KEY_PANEL_Y = "panel_y"
+        private const val KEY_BUBBLE_X = "bubble_x"
+        private const val KEY_BUBBLE_Y = "bubble_y"
 
         // ФИКС: минимальная задержка между жестами — delay=0 превращал цикл в busy-poll
         private const val MIN_DELAY_MS = 20L
@@ -79,6 +85,12 @@ class ClickService : AccessibilityService() {
 
         // ФИКС: сколько подряд отменённых жестов считаем «жесты блокируются»
         private const val MAX_CONSECUTIVE_CANCELS = 5
+
+        // ФИКС (v23): порог «тап или свайп» при записи — в DP, а не в сырых
+        // пикселях. Было 40 px: на экранах с плотностью 3x это всего ~13dp
+        // (лёгкий драг записывался тапом), на mdpi — целых 40dp (короткий
+        // свайп не записывался). 20dp — одинаковое поведение на всех плотностях
+        private const val SWIPE_THRESHOLD_DP = 20
 
         // ------------------------------------------------------------
         // ФИЧА: анимация клика. Прицел на точке тапа сжимается и
@@ -166,6 +178,9 @@ class ClickService : AccessibilityService() {
     // записи получает FLAG_NOT_TOUCHABLE (чтобы пропускать инжектируемый жест
     // в приложение), и кнопка «Остановить» обязана оставаться кликабельной
     private var recordStopBtn: View? = null
+    // ФИЧА (v23): живой счётчик «Записано: N» на оверлее записи — прогресс
+    // виден прямо на экране, без возврата в редактор
+    private var recCountOverlayRef: TextView? = null
     private val replayRunnable = Runnable { dispatchLiveReplay() }
     @Volatile private var replayInFlight = false
     private var pickOverlay: View? = null
@@ -186,6 +201,28 @@ class ClickService : AccessibilityService() {
     private var lastPickResult: Pair<Int, Int>? = null
 
     private val handler = Handler(Looper.getMainLooper())
+
+    // ФИЧА (v23): секундный тикер панели — таймер и счётчик обновляются
+    // КАЖДУЮ СЕКУНДУ, а не только в момент клика (при долгой задержке,
+    // например 8 минут, «0 · 00:00» замирал на всё время паузы между
+    // кликами). В паузе тикер спит — время сессии не течёт; возобновление
+    // паузы запускает его заново. Тикер безопасен при свёрнутой панели:
+    // updateCounter() просто выходит, если панели нет
+    private val uiTicker = object : Runnable {
+        override fun run() {
+            updateCounter()
+            if (playing && !paused) handler.postDelayed(this, 1000L)
+        }
+    }
+
+    private fun startUiTicker() {
+        handler.removeCallbacks(uiTicker)
+        uiTicker.run()
+    }
+
+    private fun stopUiTicker() {
+        handler.removeCallbacks(uiTicker)
+    }
 
     // Playback
     private var currentPreset: Preset? = null
@@ -288,6 +325,7 @@ class ClickService : AccessibilityService() {
         presetList = null
         recordOverlay = null; pickOverlay = null
         recordStopBtn = null
+        recCountOverlayRef = null
         super.onDestroy()
     }
 
@@ -381,6 +419,9 @@ class ClickService : AccessibilityService() {
 
     private fun showPanel() {
         if (panel != null) return
+        // ФИЧА (v23): панель возвращается на ПОСЛЕДНЮЮ позицию — перетащенное
+        // место запоминается и переживает рестарт службы
+        val (px0, py0) = savedPos(KEY_PANEL_X, KEY_PANEL_Y, 40, 200)
         val p = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -389,8 +430,8 @@ class ClickService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 40
-            y = 200
+            x = px0
+            y = py0
         }
         // ФИКС (v22): поле panelParams было «только запись» — layoutParams
         // панели и так живёт в WindowManager; локальная p используется ниже
@@ -451,6 +492,12 @@ class ClickService : AccessibilityService() {
                         runCatching { wm.updateViewLayout(v, p) }
                         return true
                     }
+                    // ФИЧА (v23): позиция запоминается при ОТПУСКАНИИ пальца —
+                    // панель вернётся сюда после рестарта службы
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        savePos(KEY_PANEL_X, KEY_PANEL_Y, p.x, p.y)
+                        return true
+                    }
                 }
                 return false
             }
@@ -479,12 +526,30 @@ class ClickService : AccessibilityService() {
         updatePanelState()
     }
 
+    /** ФИЧА (v23): сохранённая позиция оверлея (панель/пузырь).
+     *  Всё в runCatching: префы не должны ломать показ оверлея */
+    private fun savedPos(keyX: String, keyY: String, defX: Int, defY: Int): Pair<Int, Int> =
+        runCatching {
+            val sp = getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
+            sp.getInt(keyX, defX) to sp.getInt(keyY, defY)
+        }.getOrDefault(defX to defY)
+
+    /** ФИЧА (v23): запомнить позицию оверлея (панель/пузырь) при перетаскивании */
+    private fun savePos(keyX: String, keyY: String, x: Int, y: Int) {
+        runCatching {
+            getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE).edit()
+                .putInt(keyX, x).putInt(keyY, y).apply()
+        }
+    }
+
     private fun updatePanelState() {
         val st = tvStatus ?: return
         val tg = toggleBtn ?: return
         when {
             recording -> {
-                st.text = "●"; st.setTextColor(0xFFFFAA00.toInt())
+                // ФИКС (v23): красный = ЗАПИСЬ (классический REC). Раньше
+                // красным горел ПРОСТОЙ — цвет читался как «идёт запись»
+                st.text = "●"; st.setTextColor(0xFFFF4B4B.toInt())
                 tg.setImageResource(R.drawable.ic_rec); tg.isEnabled = false
                 pauseBtnRef?.isEnabled = false
             }
@@ -500,7 +565,9 @@ class ClickService : AccessibilityService() {
                 }
             }
             else -> {
-                st.text = "●"; st.setTextColor(0xFFFF2222.toInt())
+                // ФИКС (v23): простой = СЕРЫЙ (нейтральный). Раньше был красный —
+                // тот же цвет, что у записи, из-за чего простой путался с REC
+                st.text = "●"; st.setTextColor(0xFF9E9E9E.toInt())
                 tg.setImageResource(R.drawable.ic_play); tg.isEnabled = lastPreset != null
                 pauseBtnRef?.setImageResource(R.drawable.ic_pause); pauseBtnRef?.isEnabled = false
             }
@@ -530,6 +597,8 @@ class ClickService : AccessibilityService() {
         paused = !paused
         if (paused) {
             pauseStartMs = System.currentTimeMillis()
+            // ФИЧА (v23): в паузе время сессии не течёт — тикер панели спит
+            stopUiTicker()
         } else {
             // сдвигаем старт, чтобы DURATION-таймер не тикал в паузе
             startTimeMs += System.currentTimeMillis() - pauseStartMs
@@ -538,6 +607,8 @@ class ClickService : AccessibilityService() {
             // не задвоился)
             handler.removeCallbacks(tick)
             handler.post(tick)
+            // ФИЧА (v23): таймер панели снова тикает каждую секунду
+            startUiTicker()
         }
         haptic()
         updatePanelState()
@@ -751,6 +822,8 @@ class ClickService : AccessibilityService() {
 
     private fun showBubble() {
         if (bubble != null) return
+        // ФИЧА (v23): пузырь возвращается на ПОСЛЕДНЮЮ позицию
+        val (bx0, by0) = savedPos(KEY_BUBBLE_X, KEY_BUBBLE_Y, 48, 200)
         val p = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -759,8 +832,8 @@ class ClickService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 48
-            y = 200
+            x = bx0
+            y = by0
         }
         val v = runCatching { LayoutInflater.from(this).inflate(R.layout.bubble, null) }
             .getOrElse { Log.e(TAG, "showBubble: inflate failed", it); return }
@@ -802,6 +875,9 @@ class ClickService : AccessibilityService() {
                         if (!moved) {
                             haptic()
                             expandFromBubble()
+                        } else {
+                            // ФИЧА (v23): позиция пузыря запоминается после драга
+                            savePos(KEY_BUBBLE_X, KEY_BUBBLE_Y, p.x, p.y)
                         }
                         return true
                     }
@@ -821,11 +897,12 @@ class ClickService : AccessibilityService() {
      *  Раньше стоял глиф «▶» — он выглядел как кнопка play, и пользователь мог
      *  подумать, что тап запустит скрипт, хотя пузырь только разворачивает панель.
      *  Форма теперь всегда означает «развернуть», а состояние лишь подсвечивается
-     *  цветом: красный — стоит, зелёный — играет */
+     *  цветом: серый — стоит, зелёный — играет (красный зарезервирован за записью,
+     *  цвета едины с точкой статуса панели — ФИКС v23) */
     private fun updateBubbleIcon() {
         val iv = bubbleIcon ?: return
         iv.setImageResource(R.drawable.ic_expand)
-        iv.setColorFilter(if (playing) 0xFF00CC44.toInt() else 0xFFFF4B4B.toInt())
+        iv.setColorFilter(if (playing) 0xFF00CC44.toInt() else 0xFF9E9E9E.toInt())
     }
 
     // ============================================================
@@ -1290,6 +1367,9 @@ class ClickService : AccessibilityService() {
         // ФИКС: снимаем возможные «хвосты» tick — цепочка цикла всегда одна
         handler.removeCallbacks(tick)
         handler.post(tick)
+        // ФИЧА (v23): секундный тикер панели — таймер/счётчик обновляются
+        // каждую секунду, а не только в момент клика
+        startUiTicker()
         return true
     }
 
@@ -1299,6 +1379,8 @@ class ClickService : AccessibilityService() {
         paused = false
         gestureInFlight = false
         handler.removeCallbacks(tick)
+        // ФИЧА (v23): тикер панели больше не нужен
+        stopUiTicker()
         hideClickMarker()
         if (currentPreset?.mode == "ST") {
             // ФИКС: крестик возвращается ровно на точку тапа пресета
@@ -1706,7 +1788,10 @@ class ClickService : AccessibilityService() {
                         recordedActions[li] = recordedActions[li].copy(delayMs = gap)
                     }
                     lastRecTime = now
-                    val action = if (dist < 40f) {
+                    // ФИКС (v23): порог «тап или свайп» — в DP (SWIPE_THRESHOLD_DP),
+                    // а не в сырых пикселях: 40 px на 3x-экране это всего ~13dp
+                    val swipeThresholdPx = SWIPE_THRESHOLD_DP * resources.displayMetrics.density
+                    val action = if (dist < swipeThresholdPx) {
                         PresetAction("tap", downX.toInt(), downY.toInt(), 0, 0, 0L, delayMs = 0L)
                     } else {
                         PresetAction("swipe",
@@ -1715,6 +1800,8 @@ class ClickService : AccessibilityService() {
                             dt.coerceIn(50L, 5000L), delayMs = 0L)
                     }
                     recordedActions.add(action)
+                    // ФИЧА (v23): счётчик на оверлее записи — сразу видно прогресс
+                    updateRecCountOverlay()
                     // ФИЧА: живой предпросмотр — жест тут же выполняется на экране
                     scheduleLiveReplay(action)
                     true
@@ -1744,6 +1831,9 @@ class ClickService : AccessibilityService() {
         val v = runCatching { LayoutInflater.from(this).inflate(R.layout.record_stop, null) }
             .getOrElse { Log.e(TAG, "showRecordStopButton: inflate failed", it); return false }
         recordStopBtn = v
+        // ФИЧА (v23): живой счётчик «Записано: N» над кнопкой остановки
+        recCountOverlayRef = v.findViewById(R.id.tvRecCountOverlay)
+        updateRecCountOverlay()
         v.findViewById<View>(R.id.stopRecordBtn)?.setOnClickListener {
             stopRecordingInternal(bringBackEditor = true)
         }
@@ -1753,6 +1843,11 @@ class ClickService : AccessibilityService() {
             return false
         }
         return true
+    }
+
+    /** ФИЧА (v23): обновить счётчик записанных действий на оверлее записи */
+    private fun updateRecCountOverlay() {
+        recCountOverlayRef?.text = "Записано: ${recordedActions.size}"
     }
 
     /** ФИЧА: живой предпросмотр — отложить воспроизведение записанного жеста */
@@ -1814,6 +1909,8 @@ class ClickService : AccessibilityService() {
         recordParams = null
         recordStopBtn?.let { runCatching { wm.removeView(it) } }
         recordStopBtn = null
+        // ФИЧА (v23): счётчик оверлея записи — вместе с окном
+        recCountOverlayRef = null
     }
 
     // ============================================================

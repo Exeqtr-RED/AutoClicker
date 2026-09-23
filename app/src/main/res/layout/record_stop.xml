@@ -3,22 +3,48 @@
      Живой предпросмотр записи переводит окно записи (record_overlay.xml)
      в FLAG_NOT_TOUCHABLE, чтобы инжектируемый жест доходил до приложения.
      Кнопка «Остановить» живёт в СВОЁМ окне и потому остаётся кликабельной
-     во время предпросмотра. -->
+     во время предпросмотра.
+     ФИЧА (v23): над кнопкой живой счётчик «Записано: N» — прогресс записи
+     виден прямо на экране, без возврата в редактор. Счётчик обновляет
+     служба (ClickService.updateRecCountOverlay) на каждое записанное
+     действие; идентификатор tvRecCountOverlay ищется findViewById'ом. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="wrap_content"
     android:layout_height="wrap_content">
 
-    <TextView
-        android:id="@+id/stopRecordBtn"
+    <LinearLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:background="@drawable/btn_stop"
-        android:paddingStart="24dp"
-        android:paddingEnd="24dp"
-        android:paddingTop="14dp"
-        android:paddingBottom="14dp"
-        android:text="■  Остановить"
-        android:textSize="15sp"
-        android:textStyle="bold"
-        android:textColor="@color/text_primary" />
+        android:orientation="vertical"
+        android:gravity="center_horizontal">
+
+        <TextView
+            android:id="@+id/tvRecCountOverlay"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:background="@drawable/bg_chip"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp"
+            android:text="Записано: 0"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:textColor="@color/text_primary" />
+
+        <TextView
+            android:id="@+id/stopRecordBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/btn_stop"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:paddingTop="14dp"
+            android:paddingBottom="14dp"
+            android:text="■  Остановить"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:textColor="@color/text_primary" />
+    </LinearLayout>
 </FrameLayout>
