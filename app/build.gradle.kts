@@ -12,13 +12,40 @@ android {
         applicationId = "com.example.autoclicker"
         minSdk = 24
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // ФИКС (v19): единый ФИКСИРОВАННЫЙ ключ подписи для ВСЕХ сборок.
+    // Раньше release подписывался отладочным ключом, который У КАЖДОЙ
+    // машины СВОЙ: ~/.android/debug.keystore у тебя и свежесгенерированный
+    // на каждом запуске GitHub Actions — подписи не совпадали, и новая
+    // версия НЕ СТАВИЛАСЬ ПОВЕРХ старой («Придётся сначала удалить»).
+    // Теперь keystore лежит в репозитории (keystore/sekira.keystore) и
+    // подпись у сборок локально/в CI/разных версий ОДИНАКОВАЯ — обновления
+    // ставятся поверх без удаления данных. Пароль намеренно в открытом
+    // виде: это личный проект, ключ нужен для совместимости обновлений.
+    // ВНИМАНИЕ (одноразово): версия, установленная ДО этой правки,
+    // подписана старым ключом — v19 придётся один раз поставить с
+    // удалением старой (пресеты при удалении стираются, пересохраните
+    // их параметры). Все СЛЕДУЮЩИЕ обновления пойдут поверх.
+    signingConfigs {
+        create("sekira") {
+            storeFile = rootProject.file("keystore/sekira.keystore")
+            storePassword = "sekira2026"
+            keyAlias = "sekira"
+            keyPassword = "sekira2026"
+        }
+    }
+
     buildTypes {
+        debug {
+            // Тот же ключ, что у release: сборки любого варианта/машины
+            // взаимозаменяемы при установке
+            signingConfig = signingConfigs.getByName("sekira")
+        }
         release {
             // ФИЧА: R8-минификация кода + шринк ресурсов в release-сборке.
             // В шаблоне AGP 9 оптимизация была выключена (enable = false),
@@ -31,13 +58,9 @@ android {
             optimization {
                 enable = true
             }
-            // ФИЧА (Task 26): release подписывается отладочным ключом.
-            // Раньше release-APK собирался unsigned и НЕ УСТАНАВЛИВАЛСЯ на
-            // телефон — приходилось пользоваться debug-сборкой. Отладочный
-            // keystore (~/.android/debug.keystore) создаётся автоматически,
-            // поэтому подпись работает и локально, и в CI. Для публикации
-            // в Google Play понадобится отдельный release-keystore.
-            signingConfig = signingConfigs.getByName("debug")
+            // ФИКС (v19): фиксированный ключ из репозитория вместо
+            // отладочного (см. комментарий к signingConfigs выше)
+            signingConfig = signingConfigs.getByName("sekira")
         }
     }
     compileOptions {

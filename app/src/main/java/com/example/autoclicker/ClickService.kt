@@ -3,10 +3,12 @@ package com.example.autoclicker
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.app.ActivityManager
+import android.app.ActivityOptions
 import android.content.Context
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -1514,27 +1516,88 @@ class ClickService : AccessibilityService() {
      *  Запуск строго ИЗ КОНТЕКСТА СЛУЖБЫ — активити из фона поднимать
      *  нельзя (ограничения Android 10+), служба с выданным
      *  SYSTEM_ALERT_WINDOW — можно.
-     *  ФИКС (v18): сначала пробуем ПОДНЯТЬ ЗАДАЧУ ЦЕЛИКОМ
-     *  (ActivityManager.moveTaskToFront, разрешение REORDER_TASKS) —
-     *  сохраняется оконный режим (плавающее окно остаётся плавающим)
-     *  и не создаётся новый запуск активности. Если задачи нет или ОС
-     *  отказала — прежний путь startActivity (NEW_TASK + REORDER_TO_FRONT) */
+     *  ФИКС (v19): если перед сворачиванием окно было ОКОННЫМ, оно
+     *  поднимается startActivity'ем с СОХРАНЁННЫМИ ГРАНИЦАМИ
+     *  (ActivityOptions.setLaunchBounds) — плавающее окно возвращается
+     *  плавающим, с прежним размером и позицией, даже если систему
+     *  задачу/активность убила прошивка. Для полноэкранного окна —
+     *  прежний путь v18: ПОДНЯТЬ ЗАДАЧУ ЦЕЛИКОМ (moveTaskToFront,
+     *  REORDER_TASKS), а при её отсутствии — startActivity */
     private fun bringBackSettingsEditor(mode: String = "MTWS") {
         val tid = editorTaskId
         editorTaskId = -1
-        if (tid != -1 && runCatching { bringTaskToFront(tid) }
-                .onFailure { Log.e(TAG, "bringTaskToFront($tid) failed", it) }
+        // ФИКС (v19): окно было оконным — поднимаем с сохранёнными
+        // границами. REORDER_TO_FRONT поднимет живую активность,
+        // убитая системой создастся заново (поля вернёт черновик) —
+        // в обоих случаях границы применяются к задаче. На прошивках
+        // без поддержки свободных окон bounds молча игнорируются — безопасно
+        val geom = readEditorWindowGeometry()
+        if (geom != null && runCatching { launchEditorWithBounds(geom, mode) }
+                .onFailure { Log.e(TAG, "bringBackSettingsEditor: bounded launch failed", it) }
                 .getOrDefault(false)) {
             return
         }
-        runCatching {
-            val i = Intent(this, SettingsActivity::class.java).apply {
-                // NEW_TASK обязателен: startActivity идёт из контекста службы
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                putExtra("mode", mode)
-            }
-            startActivity(i)
-        }.onFailure { Log.e(TAG, "bringBackSettingsEditor: failed", it) }
+        // ФИКС (v18→v19): подъём задачи целиком сохранён для полноэкранного
+        // случая. Нюанс: moveTaskToFront НЕ БРОСАЕТ исключение, если задачи
+        // уже нет — раньше метод просто выходил, и окно не возвращалось
+        // НИКОГДА. Теперь после moveTaskToFront ВСЕГДА дублируем запуск с
+        // REORDER_TO_FRONT: живая активность получит onNewIntent (дубликата
+        // не будет), уничтоженная — создастся заново с черновиком
+        if (tid != -1 && runCatching { bringTaskToFront(tid) }
+                .onFailure { Log.e(TAG, "bringTaskToFront($tid) failed", it) }
+                .getOrDefault(false)) {
+            runCatching { launchEditorPlain(mode) }
+                .onFailure { Log.e(TAG, "bringBackSettingsEditor: plain launch failed", it) }
+            return
+        }
+        runCatching { launchEditorPlain(mode) }
+            .onFailure { Log.e(TAG, "bringBackSettingsEditor: failed", it) }
+    }
+
+    /** ФИКС (v19): границы окна редактора, сохранённые активностью перед
+     *  сворачиванием (преф win_geom в editor_draft_v1, формат "l,t,r,b"),
+     *  либо null — окно было во весь экран / геометрия неизвестна.
+     *  Всё в runCatching: битое значение не должно ломать возврат */
+    private fun readEditorWindowGeometry(): Rect? {
+        return runCatching {
+            // имя файла префов совпадает с SettingsActivity.DRAFT_PREFS
+            // (константа там private — дублируем литералом)
+            val s = getSharedPreferences("editor_draft_v1", Context.MODE_PRIVATE)
+                .getString("win_geom", null) ?: return null
+            val p = s.split(',')
+            if (p.size != 4) return null
+            val r = Rect(
+                p[0].trim().toIntOrNull() ?: return null,
+                p[1].trim().toIntOrNull() ?: return null,
+                p[2].trim().toIntOrNull() ?: return null,
+                p[3].trim().toIntOrNull() ?: return null
+            )
+            if (r.width() < 100 || r.height() < 100) return null
+            r
+        }.getOrNull()
+    }
+
+    /** ФИКС (v19): интент редактора — общий для обоих путей запуска */
+    private fun editorIntent(mode: String): Intent =
+        Intent(this, SettingsActivity::class.java).apply {
+            // NEW_TASK обязателен: startActivity идёт из контекста службы
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            putExtra("mode", mode)
+        }
+
+    /** Прежний путь: запуск без границ (полный экран / поведение системы) */
+    private fun launchEditorPlain(mode: String): Boolean {
+        startActivity(editorIntent(mode))
+        return true
+    }
+
+    /** ФИКС (v19): запуск с восстановлением границ окна — вернёт окно
+     *  в тот же оконный режим, размер и позицию, что были перед сворачиванием */
+    private fun launchEditorWithBounds(r: Rect, mode: String): Boolean {
+        val opts = ActivityOptions.makeBasic()
+        opts.setLaunchBounds(r)
+        startActivity(editorIntent(mode), opts.toBundle())
+        return true
     }
 
     /** ФИКС (v18): поднять задачу как есть — из недавних так сохраняется

@@ -522,8 +522,23 @@ class SettingsActivity : AppCompatActivity() {
             o.put("pickedX", pickedX)
             o.put("pickedY", pickedY)
             o.put("actions", arr.toString())
-            getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE)
-                .edit().putString(draftKey(), o.toString()).commit()
+            // ФИКС (v19): границы окна в координатах экрана — служба поднимет
+            // редактор В ТОМ ЖЕ оконном режиме и с тем же размером/позицией.
+            // Геометрия снимается пока окно ещё живо и разложено (writeDraft
+            // вызывается перед moveTaskToBack). Семантика:
+            //   "l,t,r,b" — окно было оконным, вернуть в этих границах;
+            //   ""        — окно было во весь экран, вернуть во весь экран
+            //               (устаревшие границы затираем!);
+            //   нет ключа — неизвестно (окно не успело разложиться/ошибка):
+            //               прежнее поведение (moveTaskToFront / fallback)
+            val ed = getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE).edit()
+            ed.putString(draftKey(), o.toString())
+            when (val g = captureWindowGeomPref()) {
+                null -> {}
+                "" -> ed.remove("win_geom")
+                else -> ed.putString("win_geom", g)
+            }
+            ed.commit()
         }
     }
 
@@ -567,8 +582,38 @@ class SettingsActivity : AppCompatActivity() {
     private fun clearDraft() {
         runCatching {
             getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE)
-                .edit().remove(draftKey()).commit()
+                .edit().remove(draftKey()).remove("win_geom").commit()
         }
+    }
+
+    /** ФИКС (v19): подготовленное значение для префа win_geom.
+     *  Вернёт:
+     *   — "l,t,r,b", если окно ОКОННОЕ (границы для возврата);
+     *   — "", если окно во весь экран (устаревшие границы надо стереть);
+     *   — null, если окно ещё не разложено (0×0 — например, уничтожение
+     *     в фоне) или при ошибке: преф НЕ трогаем, там уже валидное
+     *     значение от предыдущего сворачивания.
+     *  API 30+: точные границы окна из currentWindowMetrics;
+     *  ниже — позиция decorView на экране */
+    private fun captureWindowGeomPref(): String? {
+        return runCatching {
+            val d = window.decorView
+            if (d.width <= 0 || d.height <= 0) return null
+            if (isWindowFullscreen()) return ""
+            val b: android.graphics.Rect =
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
+                    wm.currentWindowMetrics.bounds
+                } else {
+                    val loc = IntArray(2)
+                    d.getLocationOnScreen(loc)
+                    android.graphics.Rect(loc[0], loc[1], loc[0] + d.width, loc[1] + d.height)
+                }
+            // отсекаем вырожденные размеры: восстановление в окно меньше
+            // 100×100 бессмысленно — считаем такое «неизвестным»
+            if (b.width() < 100 || b.height() < 100) null
+            else "${b.left},${b.top},${b.right},${b.bottom}"
+        }.getOrNull()
     }
 
     // ---------- Запись ----------
