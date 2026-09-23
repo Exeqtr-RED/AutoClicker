@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- ФИКС (v18): поднять ЗАДАЧУ редактора целиком (ActivityManager.moveTaskToFront)
+         из службы после выбора точки / остановки записи. В отличие от startActivity
+         это сохраняет оконный режим (плавающее окно остаётся плавающим) -->
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
 
     <application
         android:allowBackup="true"

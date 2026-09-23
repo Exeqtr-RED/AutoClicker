@@ -2,6 +2,7 @@ package com.example.autoclicker
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Path
@@ -176,6 +177,11 @@ class ClickService : AccessibilityService() {
     // ФИЧА (v14): режим редактора, из которого начали выбор точки (ST/MTWS) —
     // чтобы после тапа открыть окно настроек с той же вкладкой
     private var pickEditorMode: String = "ST"
+    // ФИКС (v18): taskId задачи редактора — активность запоминает его перед
+    // moveTaskToBack. Поднимаем ЗАДАЧУ целиком через moveTaskToFront:
+    // сохраняется ОКОННЫЙ РЕЖИМ (плавающее окно остаётся плавающим), тогда
+    // как startActivity на части прошивок открывает окно во весь экран
+    private var editorTaskId: Int = -1
     // ФИКС: результат выбора точки переживает пересоздание окна настроек —
     // забирается в SettingsActivity.onResume() через consumePickResult()
     private var lastPickResult: Pair<Int, Int>? = null
@@ -274,6 +280,7 @@ class ClickService : AccessibilityService() {
         pickOnDoneRef = null
         onRecordDoneRef = null
         pickEditorMode = "ST"
+        editorTaskId = -1
         lastPickResult = null
         lastRecordResult = null
         panel = null; crosshair = null
@@ -299,6 +306,20 @@ class ClickService : AccessibilityService() {
         lastPickResult = null
         return r
     }
+
+    /** ФИКС (v18): активность сообщает свой taskId перед сворачиванием —
+     * служба поднимет ЗАДАЧУ целиком (moveTaskToFront), а не будет запускать
+     * активность заново. Задача сохраняет оконный режим и размер окна */
+    fun noteEditorTask(taskId: Int) {
+        editorTaskId = taskId
+    }
+
+    /** ФИКС (v18): текущая позиция крестика для редактора. Раньше ST-пресет
+     * без явной точки сохранялся с пустыми actions, и тик тапал по этой
+     * глобальной позиции — ОДИНАКОВОЙ для всех таких пресетов. Теперь
+     * редактор запекает её в пресет при сохранении */
+    fun currentCrosshairPoint(): Pair<Int, Int> =
+        crosshairCenterX.toInt() to crosshairCenterY.toInt()
 
     fun consumeRecordResult(): List<PresetAction>? {
         val r = lastRecordResult
@@ -530,22 +551,38 @@ class ClickService : AccessibilityService() {
     // ФИЧА: прицел — показ/скрытие и синхронизация с пресетом
     // ============================================================
 
-    /** Кнопка панели: скрыть/показать прицел. Состояние сохраняется. */
+    /**
+     * Кнопка панели: скрыть/показать визуальных помощников ТЕКУЩЕГО режима —
+     * крестик в ST, нумерованные маркеры в MTWS. Состояние сохраняется.
+     * ФИКС: раньше кнопка управляла ТОЛЬКО крестиком — в MTWS крестика
+     * на экране нет (его роль играют маркеры), нажатие визуально ничего
+     * не меняло («кнопка не работает»), а «показать» выводило чужой
+     * ST-крестик поверх маркеров.
+     */
     private fun toggleCrosshair() {
         crosshairHidden = !crosshairHidden
         runCatching {
             getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE).edit()
                 .putBoolean(KEY_CROSSHAIR_HIDDEN, crosshairHidden).apply()
         }
+        val mtws = lastPreset?.mode == "MTWS"
         if (crosshairHidden) {
             hideCrosshair()
-            toast("Прицел скрыт")
+            // ФИКС: в MTWS скрываем именно маркеры — они и есть «прицел» этого режима
+            hideMtwsMarkers()
+            toast(if (mtws) "Маркеры скрыты" else "Прицел скрыт")
         } else {
-            if (!playing && !recording) {
-                syncCrosshairToPreset()
-                showCrosshair()
+            // ФИКС: во время playback/записи/выбора точки визуальных помощников
+            // НЕ возвращаем — touchable-оверлеи блокируют dispatchGesture
+            if (!playing && !recording && pickOverlay == null) {
+                if (mtws) {
+                    refreshMtwsMarkers()
+                } else {
+                    syncCrosshairToPreset()
+                    showCrosshair()
+                }
             }
-            toast("Прицел показан")
+            toast(if (mtws) "Маркеры показаны" else "Прицел показан")
         }
         updateCrosshairButtonIcon()
     }
@@ -969,10 +1006,15 @@ class ClickService : AccessibilityService() {
      * долгий тап — удаляет точку. Во время playback/записи/выбора точки
      * маркеры скрываются: это touchable-оверлеи, они блокировали бы
      * dispatchGesture (та же причина, по которой прячется крестик).
+     * ФИКС: уважает и кнопку ⊘ панели — если пользователь скрыл
+     * визуальных помощников, маркеры не возвращаются (рестарт службы,
+     * остановка playback, закрытие оверлеев).
      */
     private fun refreshMtwsMarkers() {
         hideMtwsMarkers()
         if (playing || recording || pickOverlay != null) return
+        // ФИКС: кнопка ⊘ панели скрывает помощников — не возвращаем их за её спиной
+        if (crosshairHidden) return
         val preset = lastPreset ?: return
         if (preset.mode != "MTWS") return
         preset.actions.forEachIndexed { i, a ->
@@ -1469,10 +1511,22 @@ class ClickService : AccessibilityService() {
     }
 
     /** ФИЧА: поднять окно настроек после остановки записи / выбора точки.
-     *  Запуск строго ИЗ КОНТЕКСТА СЛУЖБЫ с NEW_TASK — активити из фона
-     *  поднимать нельзя (ограничения Android 10+), служба с выданным
-     *  SYSTEM_ALERT_WINDOW — можно */
+     *  Запуск строго ИЗ КОНТЕКСТА СЛУЖБЫ — активити из фона поднимать
+     *  нельзя (ограничения Android 10+), служба с выданным
+     *  SYSTEM_ALERT_WINDOW — можно.
+     *  ФИКС (v18): сначала пробуем ПОДНЯТЬ ЗАДАЧУ ЦЕЛИКОМ
+     *  (ActivityManager.moveTaskToFront, разрешение REORDER_TASKS) —
+     *  сохраняется оконный режим (плавающее окно остаётся плавающим)
+     *  и не создаётся новый запуск активности. Если задачи нет или ОС
+     *  отказала — прежний путь startActivity (NEW_TASK + REORDER_TO_FRONT) */
     private fun bringBackSettingsEditor(mode: String = "MTWS") {
+        val tid = editorTaskId
+        editorTaskId = -1
+        if (tid != -1 && runCatching { bringTaskToFront(tid) }
+                .onFailure { Log.e(TAG, "bringTaskToFront($tid) failed", it) }
+                .getOrDefault(false)) {
+            return
+        }
         runCatching {
             val i = Intent(this, SettingsActivity::class.java).apply {
                 // NEW_TASK обязателен: startActivity идёт из контекста службы
@@ -1481,6 +1535,15 @@ class ClickService : AccessibilityService() {
             }
             startActivity(i)
         }.onFailure { Log.e(TAG, "bringBackSettingsEditor: failed", it) }
+    }
+
+    /** ФИКС (v18): поднять задачу как есть — из недавних так сохраняется
+     *  и оконный режим, и размер окна. Ошибка (задачи нет / отказ ОС)
+     *  вернёт false — вызывающий уйдёт в fallback через startActivity */
+    private fun bringTaskToFront(taskId: Int): Boolean {
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        am.moveTaskToFront(taskId, 0)
+        return true
     }
 
     private fun showRecordOverlay(): Boolean {

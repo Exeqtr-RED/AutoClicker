@@ -1,5 +1,6 @@
 package com.example.autoclicker
 
+import android.content.Context
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -16,6 +17,12 @@ class SettingsActivity : AppCompatActivity() {
         private const val STATE_PICKED_X = "pickedX"
         private const val STATE_PICKED_Y = "pickedY"
         private const val STATE_RECORDED = "recordedActions"
+        // ФИКС (v18): черновик редактора — переживает УНИЧТОЖЕНИЕ активности
+        // системой, пока окно свёрнуто (выбор точки / запись). Поля ввода
+        // восстанавливаются сами только при повороте; при агрессивной
+        // зачистке фона (MIUI, «Не сохранять действия») окно открывается
+        // пустым — черновик это чинит
+        private const val DRAFT_PREFS = "editor_draft_v1"
         private const val MIN_DELAY_MS = 20L
         // ФИЧА: потолок поднят с 60 с до суток — общий предел для поля в мс (ST)
         // и для полей мин+сек у действий MTWS (до 1440 мин = 24 ч)
@@ -170,6 +177,11 @@ class SettingsActivity : AppCompatActivity() {
         updateRecCount()
         rebuildActionsList()
         updatePickedPointLabel()
+
+        // ФИКС (v18): свежее окно после уничтожения в фоне — восстанавливаем
+        // черновик (все введённые поля + выбранная точка). При повороте
+        // savedInstanceState != null: состояние восстанавливает система
+        if (savedInstanceState == null) restoreDraft()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -231,6 +243,9 @@ class SettingsActivity : AppCompatActivity() {
         // колбэки; WeakReference в службе очистится, утечки активности нет
         pendingPickCb = null
         pendingRecordCb = null
+        // ФИКС (v18): явный выход («Назад») — черновик не нужен;
+        // уничтожение СИСТЕМОЙ в фоне — сохраняем введённое для восстановления
+        if (isFinishing) clearDraft() else writeDraft()
     }
 
     // ---------- Выбор точки тапа ----------
@@ -269,6 +284,11 @@ class SettingsActivity : AppCompatActivity() {
             toast("Нельзя выбирать точку во время записи/воспроизведения")
             return
         }
+        // ФИКС (v18): запоминаем задачу — служба поднимет её ЦЕЛИКОМ
+        // (сохранится оконный режим), и пишем черновик — окно может быть
+        // уничтожено системой, пока мы в фоне
+        svc.noteEditorTask(taskId)
+        writeDraft()
         moveTaskToBack(true)
     }
 
@@ -414,7 +434,23 @@ class SettingsActivity : AppCompatActivity() {
             }
             pickedX >= 0 && pickedY >= 0 ->
                 listOf(PresetAction("tap", pickedX, pickedY, 0, 0, 0L))
-            else -> emptyList() // ST без точки — тап по текущей позиции крестика
+            else -> {
+                // ФИКС (v18): пресет без явной точки раньше сохранялся с ПУСТЫМ
+                // actions, и воспроизведение тапало по ТЕКУЩЕЙ позиции крестика —
+                // глобальному состоянию службы, ОДИНАКОВОМУ для всех таких
+                // пресетов («одна позиция на все пресеты»). Теперь позиция
+                // прицела ЗАПЕКАЕТСЯ в пресет при сохранении — у каждого
+                // пресета своя точка
+                val (cx, cy) = ClickService.instance?.currentCrosshairPoint()
+                    ?: (-1 to -1)
+                if (cx >= 0 && cy >= 0) {
+                    pickedX = cx
+                    pickedY = cy
+                    updatePickedPointLabel()
+                    toast("Точка не выбрана — записана позиция прицела: $cx, $cy")
+                    listOf(PresetAction("tap", cx, cy, 0, 0, 0L))
+                } else emptyList()
+            }
         }
 
         // ФИЧА: периодичность запуска (MTWS) — пауза между полными прогонами
@@ -450,7 +486,89 @@ class SettingsActivity : AppCompatActivity() {
         val p = buildPreset() ?: return
         PresetStorage.save(this, p)
         refreshPresets()
+        // ФИКС (v18): черновик сохранённого пресета больше не нужен
+        clearDraft()
         toast("Пресет сохранён: ${p.name}")
+    }
+
+    // ---------- Черновик редактора (переживает уничтожение окна в фоне) ----------
+
+    private fun draftKey(): String = "draft_$mode"
+
+    /** Снимок всех введённых полей + выбранной точки в SharedPreferences.
+     *  commit(), а не apply(): снимок обязан пережить даже гибель процесса */
+    private fun writeDraft() {
+        runCatching {
+            val arr = JSONArray()
+            recordedActions.forEach { arr.put(it.toJson()) }
+            val o = org.json.JSONObject()
+            o.put("name", etName.text.toString())
+            o.put("delay", etDelay.text.toString())
+            o.put("jitterOn", cbJitter.isChecked)
+            o.put("jitter", etJitter.text.toString())
+            o.put(
+                "timing", when (rgTiming.checkedRadioButtonId) {
+                    R.id.rbDuration -> "DURATION"
+                    R.id.rbCycles -> "CYCLES"
+                    else -> "INFINITE"
+                }
+            )
+            o.put("hours", etHours.text.toString())
+            o.put("minutes", etMinutes.text.toString())
+            o.put("seconds", etSeconds.text.toString())
+            o.put("cycles", etCycles.text.toString())
+            o.put("repeatMin", etRepeatMin.text.toString())
+            o.put("repeatSec", etRepeatSec.text.toString())
+            o.put("pickedX", pickedX)
+            o.put("pickedY", pickedY)
+            o.put("actions", arr.toString())
+            getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE)
+                .edit().putString(draftKey(), o.toString()).commit()
+        }
+    }
+
+    /** Применяет черновик к полям. Вызывается ТОЛЬКО для свежего окна
+     *  (savedInstanceState == null): при повороте состояние восстанавливает
+     *  сама система. Возвращает true, если черновик найден и применён.
+     *  Всё в runCatching: битый/чужой черновик не должен ронять редактор */
+    private fun restoreDraft(): Boolean {
+        val s = runCatching {
+            getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE)
+                .getString(draftKey(), null)
+        }.getOrNull() ?: return false
+        val o = runCatching { org.json.JSONObject(s) }.getOrNull() ?: return false
+        return runCatching {
+            etName.setText(o.optString("name"))
+            etDelay.setText(o.optString("delay", "100"))
+            cbJitter.isChecked = o.optBoolean("jitterOn", false)
+            etJitter.setText(o.optString("jitter", "0"))
+            updateJitterFieldState()
+            when (o.optString("timing", "INFINITE")) {
+                "DURATION" -> rgTiming.check(R.id.rbDuration)
+                "CYCLES" -> rgTiming.check(R.id.rbCycles)
+                else -> rgTiming.check(R.id.rbInfinite)
+            }
+            etHours.setText(o.optString("hours", "0"))
+            etMinutes.setText(o.optString("minutes", "0"))
+            etSeconds.setText(o.optString("seconds", "0"))
+            etCycles.setText(o.optString("cycles", "1"))
+            etRepeatMin.setText(o.optString("repeatMin", "0"))
+            etRepeatSec.setText(o.optString("repeatSec", "0"))
+            pickedX = o.optInt("pickedX", -1)
+            pickedY = o.optInt("pickedY", -1)
+            updatePickedPointLabel()
+            recordedActions = parseRecordedActions(o.optString("actions"))
+            updateRecCount()
+            rebuildActionsList()
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun clearDraft() {
+        runCatching {
+            getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE)
+                .edit().remove(draftKey()).commit()
+        }
     }
 
     // ---------- Запись ----------
@@ -476,6 +594,9 @@ class SettingsActivity : AppCompatActivity() {
         // показывалась даже если служба молча отказала (уже идёт запись/воспроизведение)
         if (started) {
             toast("Запись началась. Сделайте тапы и свайпы, затем нажмите «Остановить» внизу экрана")
+            // ФИКС (v18): задача для возврата + черновик на случай уничтожения окна
+            svc.noteEditorTask(taskId)
+            writeDraft()
             moveTaskToBack(true)
         } else if (svc.isPlaying()) {
             toast("Сначала остановите воспроизведение")
