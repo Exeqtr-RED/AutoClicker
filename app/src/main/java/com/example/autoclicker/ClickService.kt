@@ -264,12 +264,11 @@ class ClickService : AccessibilityService() {
     private var cycleCount = 0
     private var startTimeMs = 0L
 
-    // ФИЧА (v24): позиция ручной навигации по действиям MTWS (кнопки ◀/▶ панели);
-    // после остановки playback продолжает с последнего выполненного действия
+    // ФИЧА (v24/v27): позиция перемотки по действиям MTWS (кнопки ◀/▶ панели);
+    // после остановки playback продолжает с последнего выполненного действия,
+    // в простое — старт playback с выбранной этой позицией
     private var manualIndex = 0
 
-    // ФИЧА (v24): жест ручного шага передан системе — колбэк вернёт маркеры
-    @Volatile private var manualStepInFlight = false
     @Volatile private var gestureInFlight = false
     private var consecutiveCancels = 0
 
@@ -500,8 +499,10 @@ class ClickService : AccessibilityService() {
         tvProgress = v.findViewById(R.id.tvProgress)
         prevBtnRef = v.findViewById(R.id.btnPrevAction)
         nextBtnRef = v.findViewById(R.id.btnNextAction)
-        prevBtnRef?.setOnClickListener { haptic(); manualStep(-1) }
-        nextBtnRef?.setOnClickListener { haptic(); manualStep(1) }
+        // ФИКС (v27): перемотка — работает и ВО ВРЕМЯ playback (прыжок к
+        // предыдущему/следующему действию), и в простое (старт с позиции)
+        prevBtnRef?.setOnClickListener { haptic(); seekStep(-1) }
+        nextBtnRef?.setOnClickListener { haptic(); seekStep(1) }
         tvDelayValue?.setOnClickListener { haptic(); showDelayEditor() }
 
         // ФИЧА: свернуть панель в пузырь
@@ -630,8 +631,11 @@ class ClickService : AccessibilityService() {
             lastPreset?.actions?.isNotEmpty() == true) View.VISIBLE else View.GONE
         prevBtnRef?.visibility = navVisible
         nextBtnRef?.visibility = navVisible
-        prevBtnRef?.isEnabled = idle
-        nextBtnRef?.isEnabled = idle
+        // ФИКС (v27): перемотка ◀/▶ работает и ВО ВРЕМЯ playback (прыжок
+        // к предыдущему/следующему действию, в простое — старт с позиции);
+        // запрещена только на записи
+        prevBtnRef?.isEnabled = !recording
+        nextBtnRef?.isEnabled = !recording
         // ФИЧА (v24): строка «Задержка: N мс» — только для ST-пресетов;
         // редактирование разрешено и во время playback (правка применяется
         // со следующего тика), запрет — только на время записи
@@ -718,52 +722,61 @@ class ClickService : AccessibilityService() {
     // ============================================================
 
     /**
-     * Ручной шаг по списку действий MTWS-пресета: кнопка ◀ панели выполняет
-     * ПРЕДЫДУЩЕЕ действие, ▶ — СЛЕДУЮЩЕЕ. Позиция хранится в manualIndex:
-     * после остановки playback она продолжает с последнего выполненного
-     * действия. На ПЕРВОМ действии ◀ ПОВТОРЯЕТ его (у первого нет предыдущего —
-     * по требованиям к фиче), после ПОСЛЕДНЕГО ▶ переходит к началу списка
-     * (воспроизведение циклично — так же, как play). Работает только в простое
-     * (не playback/запись) и когда предыдущий жест завершился.
+     * ФИКС (v27): ПЕРЕМОТКА MTWS-пресета кнопками ◀/▶ панели — работает
+     * в двух режимах.
+     * ВО ВРЕМЯ playback: ▶ немедленно выполняет следующее действие списка
+     * (оставшаяся пауза пропускается), ◀ — ПРЕДЫДУЩЕЕ (только что
+     * запущенное) действие; если ещё не выполнялось ничего — ◀ повторяет
+     * первое; после переноса цикла — возвращает к последнему.
+     * Воспроизведение НЕ останавливается: прыжок реализуется переносом
+     * ближайшего тика (removeCallbacks(tick) + post(tick)), а все проверки
+     * (летящий жест — цикл 20 мс, перенос цикла, лимит CYCLES) выполняет
+     * сам tick — ЕДИНСТВЕННЫЙ источник исполнения действий.
+     * В ПРОСТОЕ: запуск пресета С ВЫБРАННОЙ ПОЗИЦИИ — ▶ стартует со
+     * следующего за manualIndex действия (после последнего — с первого,
+     * циклично), ◀ — с предыдущего (на первом — с первого, повтор).
+     * Позиция хранится в manualIndex; после остановки playback продолжает
+     * с места остановки (stopPlayback). Во время ЗАПИСИ перемотка запрещена.
      */
-    private fun manualStep(delta: Int) {
+    private fun seekStep(delta: Int) {
         val preset = lastPreset ?: return
         if (preset.mode != "MTWS" || preset.actions.isEmpty()) return
-        if (playing || recording) return
-        if (gestureInFlight) return
+        if (recording) return
         val size = preset.actions.size
-        // ФИЧА (v24): защита от недействительного индекса (точки удалялись,
-        // пресет менялся) — позиция не должна указывать за границы списка
-        if (manualIndex >= size) manualIndex = size - 1
-        if (manualIndex < 0) manualIndex = 0
-        val idx: Int = if (delta < 0) {
-            // ◀: на первом действии — повторить его
-            if (manualIndex <= 0) 0 else manualIndex - 1
+        if (playing) {
+            val cp = currentPreset ?: return
+            if (cp.actions.isEmpty()) return
+            if (delta < 0) {
+                // ◀: повторить предыдущее (только что запущенное) действие;
+                // ничего ещё не выполнялось — повторить первое;
+                // после переноса цикла — вернуться к последнему
+                val t = if (actionIndex > 0) actionIndex - 1
+                        else if (cycleCount > 0) size - 1
+                        else 0
+                actionIndex = t.coerceIn(0, size - 1)
+                toast("Повтор действия: ${actionIndex + 1} из $size")
+            } else {
+                // ▶: следующим выполнится действие actionIndex; после
+                // последнего списка tick сам перенесёт цикл к первому
+                val n = if (actionIndex >= size) 1 else actionIndex + 1
+                toast("Следующее действие: $n из $size")
+            }
+            // Прыжок = перенос ближайшего тика: оставшаяся пауза до следующего
+            // действия пропускается; летящий жест tick дождётся (цикл 20 мс)
+            handler.removeCallbacks(tick)
+            handler.post(tick)
         } else {
-            // ▶: после последнего действия — к началу списка
-            if (manualIndex >= size - 1) 0 else manualIndex + 1
+            // Playback не идёт — старт пресета с выбранной позиции
+            val t = if (delta < 0) {
+                if (manualIndex <= 0) 0 else manualIndex - 1
+            } else {
+                if (manualIndex >= size - 1) 0 else manualIndex + 1
+            }
+            val idx = t.coerceIn(0, size - 1)
+            manualIndex = idx
+            startPlayback(preset, idx)
+            toast("Старт с действия: ${idx + 1} из $size")
         }
-        manualIndex = idx
-        val a = preset.actions[idx]
-        // Нумерованные точки — touchable-оверлеи: жест под ними перехватится
-        // (та же причина, по которой на время playback прячутся маркеры и
-        // крестик). Прячем перед жестом, возвращаем в колбэке завершения
-        hideMtwsMarkers()
-        showClickMarker(a.x1.toFloat(), a.y1.toFloat())
-        animateClick()
-        manualStepInFlight = true
-        if (a.type == "tap") {
-            performTap(a.x1.toFloat(), a.y1.toFloat())
-        } else {
-            performSwipe(a.x1.toFloat(), a.y1.toFloat(),
-                a.x2.toFloat(), a.y2.toFloat(), a.swipeDurationMs)
-        }
-        if (!gestureInFlight) {
-            // dispatch не прошёл (ошибка/отказ системы) — маркеры вернуть сразу
-            manualStepInFlight = false
-            refreshMtwsMarkers()
-        }
-        toast("Действие ${idx + 1} из $size · " + if (a.type == "tap") "тап" else "свайп")
     }
 
     /**
@@ -1694,26 +1707,33 @@ class ClickService : AccessibilityService() {
     // ============================================================
 
     /** Возвращает true, если воспроизведение реально запущено */
-    fun startPlayback(preset: Preset): Boolean {
+    // ФИКС (v27): startIndex — старт с выбранной позиции перемотки (◀/▶ в
+    // простое); дефолт 0 — прежнее поведение (кнопка play, запуск из редактора)
+    fun startPlayback(preset: Preset, startIndex: Int = 0): Boolean {
         if (playing || recording) return false
         if (preset.mode == "MTWS" && preset.actions.isEmpty()) return false
+
+        // Стартовая позиция прижимается к границам списка (для ST — всегда 0)
+        val sIdx = if (preset.mode == "MTWS" && preset.actions.isNotEmpty())
+            startIndex.coerceIn(0, preset.actions.size - 1)
+        else 0
 
         lastPreset = preset
         persistLastPreset(preset)
         currentPreset = preset
-        actionIndex = 0
+        actionIndex = sIdx
         cycleCount = 0
         startTimeMs = System.currentTimeMillis()
         gestureInFlight = false
         consecutiveCancels = 0
         clickCount = 0
         playing = true
-        // ФИЧА (v24): ручная навигация начинается с первого действия;
-        // редактор задержки закрывается — фокус уходит панели
-        manualIndex = 0
-        // ФИЧА (v25): строка прогресса начинает с нуля — до первого тика
-        // покажет первое действие с нулевым отсчётом
-        progressActionNo = 0
+        // ФИЧА (v24/v27): позиция навигации = стартовая; редактор задержки
+        // закрывается — фокус уходит панели
+        manualIndex = sIdx
+        // ФИЧА (v25/v27): строка прогресса до первого тика покажет действие,
+        // с которого стартовали (1-based); при sIdx = 0 — как раньше («Тап 1/N»)
+        progressActionNo = sIdx + 1
         nextActionAtMs = 0L
         closeDelayEditor()
 
@@ -1787,26 +1807,16 @@ class ClickService : AccessibilityService() {
         override fun onCompleted(g: GestureDescription?) {
             gestureInFlight = false
             consecutiveCancels = 0
-            // ФИЧА (v24): ручной шаг (◀/▶) — не клик воспроизведения: счётчик
-            // не трогаем, нумерованные точки возвращаются после жеста
-            if (manualStepInFlight) {
-                manualStepInFlight = false
-                refreshMtwsMarkers()
-                return
-            }
-            // ФИЧА: считаем только реально завершённые жесты
+            // ФИЧА: считаем только реально завершённые жесты.
+            // (v27: отдельных «ручных шагов мимо playback» больше нет —
+            // перемотка ◀/▶ исполняет действия через tick, поэтому КАЖДЫЙ
+            // завершённый жест — клик сценария и попадает в счётчик)
             clickCount++
             updateCounter()
         }
 
         override fun onCancelled(g: GestureDescription?) {
             gestureInFlight = false
-            // ФИЧА (v24): отменённый ручной шаг — просто возвращаем маркеры
-            if (manualStepInFlight) {
-                manualStepInFlight = false
-                refreshMtwsMarkers()
-                return
-            }
             // ФИКС: серия подряд отменённых жестов обычно означает, что жесты
             // блокирует оверлей либо координаты вне экрана. Раньше playback
             // крутился вхолостую бесконечно — теперь останавливаемся и сообщаем.

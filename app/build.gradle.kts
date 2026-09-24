@@ -12,10 +12,10 @@ android {
         applicationId = "com.example.autoclicker"
         minSdk = 24
         targetSdk = 37
-        // Маркер сборки (v26): Настройки -> Приложения -> Sekira Cliker ->
-        // версия 1.8 (9). Если там 1.8 — APK собран из свежих файлов
-        versionCode = 9
-        versionName = "1.8"
+        // Маркер сборки (v27): Настройки -> Приложения -> Sekira Cliker ->
+        // версия 1.9 (10). Если там 1.9 — APK собран из свежих файлов
+        versionCode = 10
+        versionName = "1.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
