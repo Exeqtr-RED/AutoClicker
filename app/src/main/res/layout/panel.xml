@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Компактная ВЕРТИКАЛЬНАЯ панель (как в OP Auto Clicker):
-     шапка-ручка / ▶ Старт-Стоп / ⏸ Пауза / ☰ пресеты · ⊕ прицел · ✕ закрыть -->
+     шапка-ручка / имя пресета / ◀ ▶ ▶▶ (навигация MTWS) /
+     прогресс MTWS или задержка ST (размером с play) / ☰ ⊕ ✕
+     (v25: кнопка паузы удалена — её место заняла строка прогресса MTWS) -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="156dp"
     android:layout_height="wrap_content"
@@ -31,7 +33,7 @@
         <!-- ФИКС (v23): серый по умолчанию (простой). Раньше стоял красный —
              цвет читался как «идёт запись». Реальный цвет всегда задаёт
              служба (updatePanelState): запись = красный, работа = зелёный,
-             пауза = оранжевый, простой = серый -->
+             простой = серый (v25: пауза удалена) -->
         <TextView
             android:id="@+id/tvStatus"
             android:layout_width="wrap_content"
@@ -69,35 +71,125 @@
             android:background="@drawable/btn_icon" />
     </LinearLayout>
 
-    <!-- Старт / Стоп — иконка play/stop вместо надписи (вектор вместо текста: символ ⏸/▶ может рендериться эмодзи) -->
-    <ImageButton
-        android:id="@+id/toggleBtn"
+    <!-- ФИЧА (v24/v25): имя выбранного пресета — видно, что запустит play;
+         текст ЦЕНТРИРУЕТСЯ (v25). Тап по строке открывает тот же список
+         пресетов, что и ☰ -->
+    <TextView
+        android:id="@+id/tvPresetName"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/bg_chip"
+        android:gravity="center"
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        android:paddingTop="3dp"
+        android:paddingBottom="3dp"
+        android:text="Пресет не выбран"
+        android:textSize="11sp"
+        android:textColor="#B3FFFFFF"
+        android:singleLine="true"
+        android:ellipsize="end" />
+
+    <!-- ФИЧА (v24): Старт/Стоп + навигация по действиям MTWS.
+         Для Single Target кнопки ◀/▶ скрыты (gone) — play занимает всю ширину.
+         Для MTWS: слева от play «предыдущее действие», справа — «следующее» -->
+    <LinearLayout
+        android:id="@+id/playNavRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:orientation="horizontal">
+
+        <!-- ФИЧА (v24): выполнить ПРЕДЫДУЩЕЕ действие пресета (MTWS).
+             На первом действии повторяет его. Вектор вместо текста «⏮»:
+             текстовые глифы могут рендериться эмодзи (урок кнопки play) -->
+        <ImageButton
+            android:id="@+id/btnPrevAction"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1"
+            android:layout_marginEnd="6dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:background="@drawable/btn_secondary"
+            android:stateListAnimator="@null"
+            android:src="@drawable/ic_prev"
+            android:padding="10dp"
+            android:scaleType="fitCenter"
+            android:visibility="gone"
+            android:contentDescription="Предыдущее действие" />
+
+        <ImageButton
+            android:id="@+id/toggleBtn"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1.4"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:background="@drawable/btn_primary"
+            android:stateListAnimator="@null"
+            android:src="@drawable/ic_play"
+            android:padding="10dp"
+            android:scaleType="fitCenter"
+            android:contentDescription="Старт / Стоп" />
+
+        <!-- ФИЧА (v24): перейти к СЛЕДУЮЩЕМУ действию пресета (MTWS).
+             После последнего действия — к началу списка -->
+        <ImageButton
+            android:id="@+id/btnNextAction"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:background="@drawable/btn_secondary"
+            android:stateListAnimator="@null"
+            android:src="@drawable/ic_next"
+            android:padding="10dp"
+            android:scaleType="fitCenter"
+            android:visibility="gone"
+            android:contentDescription="Следующее действие" />
+    </LinearLayout>
+
+    <!-- ФИЧА (v25): строка ПРОГРЕССА MTWS — на месте бывшей кнопки паузы.
+         В playback: «Тап 2/5 · 3,4 с» — номер выполняемого действия и
+         обратный отсчёт до следующего; в простое: «Действий: N».
+         Для ST-пресетов скрыта — её место занимает строка задержки.
+         Размер — как у кнопки play (44dp), ширина во всю панель -->
+    <TextView
+        android:id="@+id/tvProgress"
         android:layout_width="match_parent"
         android:layout_height="44dp"
-        android:minWidth="0dp"
-        android:minHeight="0dp"
-        android:background="@drawable/btn_primary"
-        android:stateListAnimator="@null"
-        android:src="@drawable/ic_play"
-        android:padding="10dp"
-        android:scaleType="fitCenter"
-        android:contentDescription="Старт / Стоп" />
-
-    <!-- Пауза — под Стартом (вертикальная компоновка); при паузе показывает ic_play (продолжить) -->
-    <ImageButton
-        android:id="@+id/pauseBtn"
-        android:layout_width="match_parent"
-        android:layout_height="40dp"
         android:layout_marginTop="6dp"
-        android:minWidth="0dp"
-        android:minHeight="0dp"
-        android:background="@drawable/btn_secondary"
-        android:stateListAnimator="@null"
-        android:src="@drawable/ic_pause"
-        android:padding="9dp"
-        android:scaleType="fitCenter"
-        android:contentDescription="Пауза / Продолжить"
-        android:enabled="false" />
+        android:background="@drawable/bg_chip"
+        android:gravity="center"
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        android:text="Действий: —"
+        android:textSize="12sp"
+        android:textColor="#B3FFFFFF"
+        android:singleLine="true"
+        android:visibility="gone" />
+
+    <!-- ФИЧА (v24/v25): строка задержки между кликами (только Single Target).
+         Показывает текущее значение (с разбросом, если включён); тап открывает
+         редактор с клавиатурой — прямо из плавающей панели, без приложения.
+         v25: высота 44dp — РАЗМЕР С КНОПКУ PLAY -->
+    <TextView
+        android:id="@+id/tvDelayValue"
+        android:layout_width="match_parent"
+        android:layout_height="44dp"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/bg_chip"
+        android:gravity="center"
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        android:text="Задержка: — мс"
+        android:textSize="12sp"
+        android:textColor="#B3FFFFFF"
+        android:singleLine="true"
+        android:visibility="gone" />
 
     <!-- Нижний ряд: выбор пресета · прицел · закрыть -->
     <LinearLayout

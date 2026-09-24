@@ -9,9 +9,14 @@ import android.content.Intent
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+// ФИЧА (v24): редактор задержки ST на плавающей панели (числовой ввод)
+import android.text.InputFilter
+import android.text.InputType
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+// ФИЧА (v25): обратный отсчёт до следующего действия MTWS (монотонные часы)
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -25,7 +30,11 @@ import android.view.ViewGroup
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+// ФИЧА (v24): показ клавиатуры над оверлей-окном редактора задержки
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+// ФИЧА (v24): поле ввода задержки в редакторе плавающей панели
+import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -59,6 +68,10 @@ class ClickService : AccessibilityService() {
 
         // ФИКС: минимальная задержка между жестами — delay=0 превращал цикл в busy-poll
         private const val MIN_DELAY_MS = 20L
+
+        // ФИЧА (v24): потолок задержки в редакторе плавающей панели —
+        // согласован с MAX_DELAY_MS редактора в приложении (сутки)
+        private const val MAX_PANEL_DELAY_MS = 24L * 60 * 60_000
 
         // ФИЧА: потолок записанной паузы между действиями (мс) — случайная
         // пауза «сделать кофе» во время записи не превращается в 10 минут ожидания
@@ -131,8 +144,23 @@ class ClickService : AccessibilityService() {
     // ФИЧА: счётчик кликов/таймер на панели
     private var tvCounter: TextView? = null
 
-    // ФИЧА: кнопка паузы на панели
-    private var pauseBtnRef: ImageButton? = null
+    // ФИЧА (v24): имя выбранного пресета на панели
+    private var tvPresetName: TextView? = null
+
+    // ФИЧА (v24): строка «Задержка: N мс» (только ST) — тап открывает редактор
+    private var tvDelayValue: TextView? = null
+
+    // ФИЧА (v24): кнопки навигации по действиям MTWS (слева/справа от play)
+    private var prevBtnRef: ImageButton? = null
+    private var nextBtnRef: ImageButton? = null
+
+    // ФИЧА (v24): редактор задержки ST — отдельное ФОКУСИРУЕМОЕ окно
+    // (без NOT_FOCUSABLE, иначе клавиатура не откроется)
+    private var delayEditor: View? = null
+
+    // ФИЧА (v25): строка прогресса MTWS на панели — номер выполняемого
+    // действия и обратный отсчёт до следующего (на месте бывшей паузы)
+    private var tvProgress: TextView? = null
 
     // ФИЧА: кнопка списка пресетов и переключатель прицела на панели
     private var presetsBtnRef: Button? = null
@@ -160,9 +188,12 @@ class ClickService : AccessibilityService() {
     private var bubble: View? = null
     private var bubbleIcon: ImageView? = null
 
-    // ФИЧА: пауза воспроизведения (прогресс циклов не сбрасывается)
-    @Volatile private var paused = false
-    private var pauseStartMs = 0L
+    // ФИЧА (v25): прогресс MTWS для строки на панели — номер (1-based)
+    // последнего запущенного действия и момент (elapsedRealtime) старта
+    // следующего; 0 = отсчёт не идёт. Пауза удалена (v25) — механика
+    // paused/pauseStartMs больше не нужна
+    private var progressActionNo = 0
+    @Volatile private var nextActionAtMs = 0L
 
     // ФИЧА: счётчик завершённых кликов за сессию
     private var clickCount = 0
@@ -202,16 +233,17 @@ class ClickService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
 
-    // ФИЧА (v23): секундный тикер панели — таймер и счётчик обновляются
-    // КАЖДУЮ СЕКУНДУ, а не только в момент клика (при долгой задержке,
-    // например 8 минут, «0 · 00:00» замирал на всё время паузы между
-    // кликами). В паузе тикер спит — время сессии не течёт; возобновление
-    // паузы запускает его заново. Тикер безопасен при свёрнутой панели:
-    // updateCounter() просто выходит, если панели нет
+    // ФИЧА (v23/v25): тикер панели — таймер/счётчик и строка прогресса MTWS.
+    // Интервал 100 мс: обратный отсчёт до следующего действия обновляется
+    // ПЛАВНО (с десятыми долями секунды); таймер сессии показывает целые
+    // секунды — частая перерисовка на него не влияет. Тикер безопасен при
+    // свёрнутой панели: updateCounter()/updateProgress() просто выходят,
+    // если панель не показана
     private val uiTicker = object : Runnable {
         override fun run() {
             updateCounter()
-            if (playing && !paused) handler.postDelayed(this, 1000L)
+            updateProgress()
+            if (playing) handler.postDelayed(this, 100L)
         }
     }
 
@@ -231,6 +263,13 @@ class ClickService : AccessibilityService() {
     private var actionIndex = 0
     private var cycleCount = 0
     private var startTimeMs = 0L
+
+    // ФИЧА (v24): позиция ручной навигации по действиям MTWS (кнопки ◀/▶ панели);
+    // после остановки playback продолжает с последнего выполненного действия
+    private var manualIndex = 0
+
+    // ФИЧА (v24): жест ручного шага передан системе — колбэк вернёт маркеры
+    @Volatile private var manualStepInFlight = false
     @Volatile private var gestureInFlight = false
     private var consecutiveCancels = 0
 
@@ -310,6 +349,8 @@ class ClickService : AccessibilityService() {
             // ФИЧА: отдельное окно стоп-кнопки оверлея записи — тоже чистим
             recordStopBtn?.let { runCatching { wm.removeView(it) } }
             pickOverlay?.let { runCatching { wm.removeView(it) } }
+            // ФИЧА (v24): окно редактора задержки — тоже чистим
+            delayEditor?.let { runCatching { wm.removeView(it) } }
             hideMtwsMarkers()
         }
         // ФИКС (утечка памяти): колбэки и результаты — вместе с окнами
@@ -326,6 +367,8 @@ class ClickService : AccessibilityService() {
         recordOverlay = null; pickOverlay = null
         recordStopBtn = null
         recCountOverlayRef = null
+        delayEditor = null
+        tvProgress = null
         super.onDestroy()
     }
 
@@ -447,12 +490,19 @@ class ClickService : AccessibilityService() {
         tvStatus = v.findViewById(R.id.tvStatus)
         toggleBtn = v.findViewById(R.id.toggleBtn)
         tvCounter = v.findViewById(R.id.tvCounter)
-        pauseBtnRef = v.findViewById(R.id.pauseBtn)
         presetsBtnRef = v.findViewById(R.id.presetsBtn)
         crosshairBtnRef = v.findViewById(R.id.crosshairBtn)
 
-        // ФИЧА: пауза — прогресс циклов не сбрасывается
-        pauseBtnRef?.setOnClickListener { togglePause() }
+        // ФИЧА (v24/v25): имя пресета, строка задержки, прогресс MTWS
+        // и кнопки навигации
+        tvPresetName = v.findViewById(R.id.tvPresetName)
+        tvDelayValue = v.findViewById(R.id.tvDelayValue)
+        tvProgress = v.findViewById(R.id.tvProgress)
+        prevBtnRef = v.findViewById(R.id.btnPrevAction)
+        nextBtnRef = v.findViewById(R.id.btnNextAction)
+        prevBtnRef?.setOnClickListener { haptic(); manualStep(-1) }
+        nextBtnRef?.setOnClickListener { haptic(); manualStep(1) }
+        tvDelayValue?.setOnClickListener { haptic(); showDelayEditor() }
 
         // ФИЧА: свернуть панель в пузырь
         v.findViewById<TextView>(R.id.minimizeBtn)?.setOnClickListener {
@@ -515,6 +565,8 @@ class ClickService : AccessibilityService() {
 
         v.findViewById<Button>(R.id.closeBtn)?.setOnClickListener {
             haptic()
+            // ФИЧА (v24): редактор задержки (фокусируемое окно) закрывается первым
+            closeDelayEditor()
             stopPlayback()
             stopRecordingInternal()
             hidePresetList()
@@ -551,68 +603,309 @@ class ClickService : AccessibilityService() {
                 // красным горел ПРОСТОЙ — цвет читался как «идёт запись»
                 st.text = "●"; st.setTextColor(0xFFFF4B4B.toInt())
                 tg.setImageResource(R.drawable.ic_rec); tg.isEnabled = false
-                pauseBtnRef?.isEnabled = false
             }
             playing -> {
-                if (paused) {
-                    st.text = "II"; st.setTextColor(0xFFFFB300.toInt())
-                    tg.setImageResource(R.drawable.ic_stop); tg.isEnabled = true
-                    pauseBtnRef?.setImageResource(R.drawable.ic_play); pauseBtnRef?.isEnabled = true
-                } else {
-                    st.text = "●"; st.setTextColor(0xFF00CC44.toInt())
-                    tg.setImageResource(R.drawable.ic_stop); tg.isEnabled = true
-                    pauseBtnRef?.setImageResource(R.drawable.ic_pause); pauseBtnRef?.isEnabled = true
-                }
+                // v25: пауза удалена — во время playback статус всегда зелёный
+                st.text = "●"; st.setTextColor(0xFF00CC44.toInt())
+                tg.setImageResource(R.drawable.ic_stop); tg.isEnabled = true
             }
             else -> {
                 // ФИКС (v23): простой = СЕРЫЙ (нейтральный). Раньше был красный —
                 // тот же цвет, что у записи, из-за чего простой путался с REC
                 st.text = "●"; st.setTextColor(0xFF9E9E9E.toInt())
                 tg.setImageResource(R.drawable.ic_play); tg.isEnabled = lastPreset != null
-                pauseBtnRef?.setImageResource(R.drawable.ic_pause); pauseBtnRef?.isEnabled = false
             }
         }
         // ФИЧА: во время работы кнопки пресетов/прицела блокируются
         val idle = !playing && !recording
         presetsBtnRef?.isEnabled = idle
         crosshairBtnRef?.isEnabled = idle
+        // ФИЧА (v24): имя выбранного пресета на панели — видно, что запустит play
+        tvPresetName?.text = when {
+            lastPreset == null -> "Пресет не выбран"
+            lastPreset?.mode == "MTWS" -> "MTWS · ${lastPreset?.name}"
+            else -> lastPreset?.name ?: ""
+        }
+        // ФИЧА (v24): кнопки ◀/▶ навигации — только для MTWS-пресетов,
+        // в простое (не playback/запись)
+        val navVisible = if (lastPreset?.mode == "MTWS" &&
+            lastPreset?.actions?.isNotEmpty() == true) View.VISIBLE else View.GONE
+        prevBtnRef?.visibility = navVisible
+        nextBtnRef?.visibility = navVisible
+        prevBtnRef?.isEnabled = idle
+        nextBtnRef?.isEnabled = idle
+        // ФИЧА (v24): строка «Задержка: N мс» — только для ST-пресетов;
+        // редактирование разрешено и во время playback (правка применяется
+        // со следующего тика), запрет — только на время записи
+        val dv = tvDelayValue
+        if (dv != null) {
+            val pr = lastPreset
+            if (pr != null && pr.mode == "ST") {
+                dv.visibility = View.VISIBLE
+                dv.text = if (pr.delayJitterMs > 0)
+                    "Задержка: ${pr.delayMs}±${pr.delayJitterMs} мс"
+                else
+                    "Задержка: ${pr.delayMs} мс"
+                dv.isEnabled = !recording
+            } else {
+                dv.visibility = View.GONE
+            }
+        }
+        // ФИЧА (v25): строка ПРОГРЕССА MTWS — видна только для MTWS-пресетов
+        // с действиями (занимает место бывшей паузы; для ST это место занимает
+        // строка задержки). В playback текст обновляет тикер (каждые 100 мс),
+        // здесь — начальный текст и его сброс при смене состояния
+        val pv = tvProgress
+        if (pv != null) {
+            val pr = lastPreset
+            if (pr != null && pr.mode == "MTWS" && pr.actions.isNotEmpty()) {
+                pv.visibility = View.VISIBLE
+                updateProgress()
+            } else {
+                pv.visibility = View.GONE
+            }
+        }
         updateCrosshairButtonIcon()
         updateCounter()
     }
 
-    /** ФИЧА: счётчик кликов + таймер сессии в шапке панели */
+    /** ФИЧА: счётчик кликов + таймер сессии в шапке панели.
+     *  v25: пауза удалена — время течёт, пока идёт playback */
     private fun updateCounter() {
         val tv = tvCounter ?: return
-        val secs: Long = when {
-            playing && !paused -> (System.currentTimeMillis() - startTimeMs) / 1000
-            playing && paused -> (pauseStartMs - startTimeMs) / 1000
-            else -> 0L
-        }
+        val secs: Long = if (playing) (System.currentTimeMillis() - startTimeMs) / 1000 else 0L
         tv.text = "%d · %02d:%02d".format(clickCount, secs / 60, secs % 60)
     }
 
-    /** ФИЧА: пауза — tick засыпает, прогресс циклов и таймер сохраняются */
-    private fun togglePause() {
-        if (!playing) return
-        paused = !paused
-        if (paused) {
-            pauseStartMs = System.currentTimeMillis()
-            // ФИЧА (v23): в паузе время сессии не течёт — тикер панели спит
-            stopUiTicker()
-        } else {
-            // сдвигаем старт, чтобы DURATION-таймер не тикал в паузе
-            startTimeMs += System.currentTimeMillis() - pauseStartMs
-            // ФИКС: в паузе цепочка tick остановлена совсем — здесь запускаем
-            // заново (removeCallbacks снимает возможные «хвосты», чтобы цикл
-            // не задвоился)
-            handler.removeCallbacks(tick)
-            handler.post(tick)
-            // ФИЧА (v23): таймер панели снова тикает каждую секунду
-            startUiTicker()
+    /** ФИЧА (v25): формат обратного отсчёта до следующего действия.
+     *  От минуты и выше — «М:СС» (долгие паузы не пугают десятками
+     *  сотен секунд), от 10 секунд — целые секунды, меньше — с десятыми
+     *  («3,4 с»). Отрицательный остаток (жест ещё летит) — «0,0 с» */
+    private fun formatCountdown(ms: Long): String {
+        val m = ms.coerceAtLeast(0L)
+        val sec = m / 1000L
+        return when {
+            sec >= 60L -> "${sec / 60L}:${"%02d".format(sec % 60L)}"
+            sec >= 10L -> "$sec с"
+            else -> "${sec},${(m % 1000L) / 100L} с"
         }
-        haptic()
+    }
+
+    /**
+     * ФИЧА (v25): строка прогресса MTWS на панели — на месте бывшей кнопки
+     * паузы. В playback: «Тап 2/5 · 3,4 с» — номер выполняемого действия
+     * и обратный отсчёт до следующего (обновляется тикером каждые 100 мс;
+     * после последнего действия цикла отсчёт идёт до ПОВТОРА списка —
+     * периодичность repeatIntervalMs). В простое: «Действий: N».
+     * Для ST-пресетов строка скрыта целиком — её место занимает поле задержки
+     */
+    private fun updateProgress() {
+        val pv = tvProgress ?: return
+        val preset = lastPreset ?: return
+        if (preset.mode != "MTWS" || preset.actions.isEmpty()) return
+        val size = preset.actions.size
+        if (!playing) {
+            pv.text = "Действий: $size"
+            return
+        }
+        val no = progressActionNo.coerceIn(1, size)
+        val kind = if (preset.actions[no - 1].type == "tap") "Тап" else "Свайп"
+        val remain = nextActionAtMs - SystemClock.elapsedRealtime()
+        pv.text = "$kind $no/$size · ${formatCountdown(remain)}"
+    }
+
+    // ============================================================
+    // ФИЧА (v24): ручная навигация по действиям MTWS + редактор
+    // задержки ST прямо из плавающей панели
+    // ============================================================
+
+    /**
+     * Ручной шаг по списку действий MTWS-пресета: кнопка ◀ панели выполняет
+     * ПРЕДЫДУЩЕЕ действие, ▶ — СЛЕДУЮЩЕЕ. Позиция хранится в manualIndex:
+     * после остановки playback она продолжает с последнего выполненного
+     * действия. На ПЕРВОМ действии ◀ ПОВТОРЯЕТ его (у первого нет предыдущего —
+     * по требованиям к фиче), после ПОСЛЕДНЕГО ▶ переходит к началу списка
+     * (воспроизведение циклично — так же, как play). Работает только в простое
+     * (не playback/запись) и когда предыдущий жест завершился.
+     */
+    private fun manualStep(delta: Int) {
+        val preset = lastPreset ?: return
+        if (preset.mode != "MTWS" || preset.actions.isEmpty()) return
+        if (playing || recording) return
+        if (gestureInFlight) return
+        val size = preset.actions.size
+        // ФИЧА (v24): защита от недействительного индекса (точки удалялись,
+        // пресет менялся) — позиция не должна указывать за границы списка
+        if (manualIndex >= size) manualIndex = size - 1
+        if (manualIndex < 0) manualIndex = 0
+        val idx: Int = if (delta < 0) {
+            // ◀: на первом действии — повторить его
+            if (manualIndex <= 0) 0 else manualIndex - 1
+        } else {
+            // ▶: после последнего действия — к началу списка
+            if (manualIndex >= size - 1) 0 else manualIndex + 1
+        }
+        manualIndex = idx
+        val a = preset.actions[idx]
+        // Нумерованные точки — touchable-оверлеи: жест под ними перехватится
+        // (та же причина, по которой на время playback прячутся маркеры и
+        // крестик). Прячем перед жестом, возвращаем в колбэке завершения
+        hideMtwsMarkers()
+        showClickMarker(a.x1.toFloat(), a.y1.toFloat())
+        animateClick()
+        manualStepInFlight = true
+        if (a.type == "tap") {
+            performTap(a.x1.toFloat(), a.y1.toFloat())
+        } else {
+            performSwipe(a.x1.toFloat(), a.y1.toFloat(),
+                a.x2.toFloat(), a.y2.toFloat(), a.swipeDurationMs)
+        }
+        if (!gestureInFlight) {
+            // dispatch не прошёл (ошибка/отказ системы) — маркеры вернуть сразу
+            manualStepInFlight = false
+            refreshMtwsMarkers()
+        }
+        toast("Действие ${idx + 1} из $size · " + if (a.type == "tap") "тап" else "свайп")
+    }
+
+    /**
+     * ФИЧА (v24): редактор задержки между кликами ST-пресета прямо из панели.
+     * Отдельное ФОКУСИРУЕМОЕ окно (БЕЗ FLAG_NOT_FOCUSABLE) — иначе клавиатура
+     * не откроется: основная панель всегда NOT_FOCUSABLE, чтобы не красть
+     * клавиши у приложения под ней. «Сохранить» пишет значение в последний
+     * пресет, в хранилище пресетов (переживает рестарт) и в идущий playback
+     * (со следующего тика), «Отмена» закрывает без изменений.
+     */
+    private fun showDelayEditor() {
+        if (delayEditor != null) return
+        val preset = lastPreset ?: return
+        if (preset.mode != "ST") return
+        if (recording) return
+        val d = resources.displayMetrics.density
+        fun px(v: Int) = (v * d).toInt()
+
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.bg_panel)
+            setPadding(px(14), px(12), px(14), px(14))
+        }
+
+        val title = TextView(this).apply {
+            text = "Задержка между кликами"
+            textSize = 14f
+            setTextColor(context.getColor(R.color.text_primary))
+        }
+        box.addView(title)
+
+        val subtitle = TextView(this).apply {
+            text = "Пресет «${preset.name}» · миллисекунды (20 — сутки)"
+            textSize = 11f
+            setTextColor(context.getColor(R.color.text_secondary))
+            setPadding(0, px(2), 0, px(8))
+        }
+        box.addView(subtitle)
+
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+            filters = arrayOf<InputFilter>(InputFilter.LengthFilter(8))
+            setText(preset.delayMs.toString())
+            // Урок v7: цвета текста/хинта задаются ЯВНО — на тёмном фоне
+            // дефолтные чёрные цифры не видны
+            setTextColor(context.getColor(R.color.text_primary))
+            setHintTextColor(context.getColor(R.color.text_hint))
+            setBackgroundResource(R.drawable.bg_input)
+            setPadding(px(10), px(8), px(10), px(8))
+        }
+        box.addView(input, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, px(10), 0, 0)
+        }
+        val okBtn = Button(this).apply {
+            text = "Сохранить"
+            textSize = 13f
+            isAllCaps = false
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundResource(R.drawable.btn_primary)
+            stateListAnimator = null
+            setOnClickListener {
+                if (applyDelayFromEditor(input)) closeDelayEditor()
+            }
+        }
+        val cancelBtn = Button(this).apply {
+            text = "Отмена"
+            textSize = 13f
+            isAllCaps = false
+            setTextColor(context.getColor(R.color.text_primary))
+            setBackgroundResource(R.drawable.btn_secondary)
+            stateListAnimator = null
+            setOnClickListener { closeDelayEditor() }
+        }
+        row.addView(okBtn, LinearLayout.LayoutParams(0, px(40), 1.5f).apply { marginEnd = px(8) })
+        row.addView(cancelBtn, LinearLayout.LayoutParams(0, px(40), 1f))
+        box.addView(row, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+
+        val p = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(),
+            // ВАЖНО: БЕЗ FLAG_NOT_FOCUSABLE — окно принимает ввод и клавиатуру
+            overlayFlags(0),
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.CENTER
+            width = px(248)
+        }
+        delayEditor = box
+        if (runCatching { wm.addView(box, p) }.isFailure) {
+            Log.e(TAG, "showDelayEditor: addView failed")
+            delayEditor = null
+            return
+        }
+        input.requestFocus()
+        handler.post {
+            runCatching {
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
+                    as InputMethodManager
+                imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
+    }
+
+    /** ФИЧА (v24): закрыть редактор задержки (окно + ссылка) */
+    private fun closeDelayEditor() {
+        delayEditor?.let { runCatching { wm.removeView(it) } }
+        delayEditor = null
+    }
+
+    /** ФИЧА (v24): применить введённую задержку — в последний пресет,
+     *  в хранилище пресетов (та же пара имя+режим — заменяется) и в идущий
+     *  playback (currentPreset — со следующего тика). false — ввод не число */
+    private fun applyDelayFromEditor(input: EditText): Boolean {
+        val preset = lastPreset ?: return false
+        val raw = input.text.toString().trim().toLongOrNull()
+        if (raw == null) {
+            toast("Введите число в миллисекундах")
+            return false
+        }
+        val v = raw.coerceIn(MIN_DELAY_MS, MAX_PANEL_DELAY_MS)
+        val updated = preset.copy(delayMs = v)
+        lastPreset = updated
+        if (playing) currentPreset = updated
+        persistLastPreset(updated)
+        PresetStorage.save(this, updated)
         updatePanelState()
-        dbg { "paused=$paused" }
+        toast(if (v != raw)
+            "Задержка: $v мс (потолок — сутки)"
+        else
+            "Задержка сохранена: $v мс")
+        return true
     }
 
     // ============================================================
@@ -777,6 +1070,9 @@ class ClickService : AccessibilityService() {
         hidePresetList()
         lastPreset = preset
         persistLastPreset(preset)
+        // ФИЧА (v24): позиция ручной навигации сбрасывается — индекс от
+        // ПРЕДЫДУЩЕГО пресета может выйти за границы нового списка действий
+        manualIndex = 0
         if (preset.mode == "ST") {
             hideMtwsMarkers()
             if (!crosshairHidden) {
@@ -809,9 +1105,16 @@ class ClickService : AccessibilityService() {
         tvStatus = null
         toggleBtn = null
         tvCounter = null
-        pauseBtnRef = null
         presetsBtnRef = null
         crosshairBtnRef = null
+        // ФИЧА (v24/v25): ссылки на новые элементы панели — вместе с панелью;
+        // редактор задержки (отдельное окно) закрывается, иначе останется висеть
+        tvPresetName = null
+        tvDelayValue = null
+        tvProgress = null
+        prevBtnRef = null
+        nextBtnRef = null
+        closeDelayEditor()
         showBubble()
     }
 
@@ -1187,11 +1490,19 @@ class ClickService : AccessibilityService() {
         lastPreset = preset.copy(actions = preset.actions.filterIndexed { i, _ -> i != marker.index })
         currentPreset = lastPreset
         persistLastPreset(lastPreset!!)
+        // ФИЧА (v24): позиция ручной навигации прижимается к новому размеру
+        // списка — после удаления точки индекс может стать недействительным
+        if (manualIndex >= lastPreset!!.actions.size) {
+            manualIndex = lastPreset!!.actions.size - 1
+        }
+        if (manualIndex < 0) manualIndex = 0
         mtwsMarkers.removeAll { it.view === view }
         runCatching { wm.removeView(view) }
         toast("Точка ${marker.index + 1} удалена")
         // Пересобрать оставшиеся маркеры — они перенумеруются
         refreshMtwsMarkers()
+        // ФИЧА (v25): строка прогресса показывает новый размер списка
+        updateProgress()
     }
 
     private fun saveMarkerPosition(view: View, p: WindowManager.LayoutParams) {
@@ -1343,8 +1654,15 @@ class ClickService : AccessibilityService() {
         gestureInFlight = false
         consecutiveCancels = 0
         clickCount = 0
-        paused = false
         playing = true
+        // ФИЧА (v24): ручная навигация начинается с первого действия;
+        // редактор задержки закрывается — фокус уходит панели
+        manualIndex = 0
+        // ФИЧА (v25): строка прогресса начинает с нуля — до первого тика
+        // покажет первое действие с нулевым отсчётом
+        progressActionNo = 0
+        nextActionAtMs = 0L
+        closeDelayEditor()
 
         // ФИЧА: нумерованные точки — touchable-оверлеи, на время playback
         // убираем вместе с крестиком, чтобы не блокировали dispatchGesture
@@ -1376,9 +1694,23 @@ class ClickService : AccessibilityService() {
     fun stopPlayback() {
         if (!playing) return
         playing = false
-        paused = false
         gestureInFlight = false
+        // ФИЧА (v24): ручная навигация продолжает с места остановки — последним
+        // выполненным считаем действие, на котором playback остановился.
+        // После полного прогона цикла (actionIndex уже обнулился) — последнее
+        // действие списка; если не выполнилось ни одного — первое
+        val sp = currentPreset
+        if (sp != null && sp.mode == "MTWS" && sp.actions.isNotEmpty()) {
+            manualIndex = when {
+                actionIndex > 0 -> actionIndex - 1
+                cycleCount > 0 -> sp.actions.size - 1
+                else -> 0
+            }.coerceIn(0, sp.actions.size - 1)
+        }
         handler.removeCallbacks(tick)
+        // ФИЧА (v25): отсчёт до следующего действия больше не идёт —
+        // строка прогресса переходит в простой («Действий: N»)
+        nextActionAtMs = 0L
         // ФИЧА (v23): тикер панели больше не нужен
         stopUiTicker()
         hideClickMarker()
@@ -1402,6 +1734,13 @@ class ClickService : AccessibilityService() {
         override fun onCompleted(g: GestureDescription?) {
             gestureInFlight = false
             consecutiveCancels = 0
+            // ФИЧА (v24): ручной шаг (◀/▶) — не клик воспроизведения: счётчик
+            // не трогаем, нумерованные точки возвращаются после жеста
+            if (manualStepInFlight) {
+                manualStepInFlight = false
+                refreshMtwsMarkers()
+                return
+            }
             // ФИЧА: считаем только реально завершённые жесты
             clickCount++
             updateCounter()
@@ -1409,6 +1748,12 @@ class ClickService : AccessibilityService() {
 
         override fun onCancelled(g: GestureDescription?) {
             gestureInFlight = false
+            // ФИЧА (v24): отменённый ручной шаг — просто возвращаем маркеры
+            if (manualStepInFlight) {
+                manualStepInFlight = false
+                refreshMtwsMarkers()
+                return
+            }
             // ФИКС: серия подряд отменённых жестов обычно означает, что жесты
             // блокирует оверлей либо координаты вне экрана. Раньше playback
             // крутился вхолостую бесконечно — теперь останавливаемся и сообщаем.
@@ -1424,10 +1769,6 @@ class ClickService : AccessibilityService() {
     private val tick = object : Runnable {
         override fun run() {
             if (!playing) return
-            // ФИЧА + ФИКС (перф): в паузе цикл засыпает совсем, без опроса
-            // каждые 100 мс. Возобновление в togglePause() запускает цепочку
-            // заново; прогресс циклов и таймер при этом сохраняются
-            if (paused) return
             val preset = currentPreset ?: run { stopPlayback(); return }
 
             val shouldStop: Boolean = when (preset.timingMode) {
@@ -1505,6 +1846,13 @@ class ClickService : AccessibilityService() {
                     preset.repeatIntervalMs
                 else
                     preset.actions[actionIndex - 1].delayMs
+                // ФИЧА (v25): строка прогресса — номер только что запущенного
+                // действия (actionIndex уже инкрементирован, т.е. 1-based) и
+                // момент старта следующего; после последнего действия цикла
+                // отсчёт идёт до повторения списка (repeatIntervalMs)
+                progressActionNo = actionIndex
+                nextActionAtMs = SystemClock.elapsedRealtime() +
+                    nextDelay.coerceAtLeast(MIN_DELAY_MS)
                 handler.postDelayed(this, nextDelay.coerceAtLeast(MIN_DELAY_MS))
             }
         }
