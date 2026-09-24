@@ -42,6 +42,12 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refreshPermissionButtons()
+        // ФИКС (v26): панель возвращается при каждом открытии приложения.
+        // Служба Accessibility больше не выключается кнопкой ✕ панели
+        // (раньше она вызывала disableSelf() — из-за этого права Accessibility
+        // приходилось выдавать заново при каждом запуске). Если панель была
+        // свёрнута в пузырь — разворачивать не будем, пузырь останется
+        if (ClickService.instance != null) ClickService.instance?.ensureOverlays()
     }
 
     // ФИКС: статус обеих кнопок обновляется при каждом возврате на экран

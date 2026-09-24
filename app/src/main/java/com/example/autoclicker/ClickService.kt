@@ -565,15 +565,13 @@ class ClickService : AccessibilityService() {
 
         v.findViewById<Button>(R.id.closeBtn)?.setOnClickListener {
             haptic()
-            // ФИЧА (v24): редактор задержки (фокусируемое окно) закрывается первым
-            closeDelayEditor()
-            stopPlayback()
-            stopRecordingInternal()
-            hidePresetList()
-            panel?.let { runCatching { wm.removeView(it) } }
-            crosshair?.let { runCatching { wm.removeView(it) } }
-            panel = null; crosshair = null
-            disableSelf()
+            // ФИКС (v26): кнопка ✕ больше НЕ выключает службу Accessibility.
+            // Раньше здесь вызывался disableSelf() — тумблер службы в системных
+            // настройках сбрасывался, и при каждом запуске приложения права
+            // Accessibility приходилось выдавать ЗАНОВО. Теперь панель просто
+            // полностью скрывается, служба остаётся включённой; вернуть
+            // панель — откройте приложение (появится автоматически)
+            closeAllOverlays()
         }
         updatePanelState()
     }
@@ -1150,8 +1148,17 @@ class ClickService : AccessibilityService() {
         }
         updateBubbleIcon()
 
-        // Тап (без движения) — развернуть панель, драг — переместить пузырь
+        // Тап (без движения) — развернуть панель, драг — переместить пузырь.
+        // ФИЧА (v26): УДЕРЖАНИЕ пузыря — полностью скрыть оверлеи (служба
+        // остаётся включённой; вернуть панель — открыть приложение)
         val slop = ViewConfiguration.get(this).scaledTouchSlop
+        val longPressTimeout = ViewConfiguration.getLongPressTimeout().toLong()
+        var longPressFired = false
+        val longPressClose = Runnable {
+            longPressFired = true
+            haptic()
+            closeAllOverlays()
+        }
         v.setOnTouchListener(object : View.OnTouchListener {
             var sx = 0; var sy = 0; var tx = 0f; var ty = 0f
             var moved = false
@@ -1161,12 +1168,18 @@ class ClickService : AccessibilityService() {
                         sx = p.x; sy = p.y
                         tx = e.rawX; ty = e.rawY
                         moved = false
+                        longPressFired = false
+                        handler.postDelayed(longPressClose, longPressTimeout)
                         return true
                     }
                     MotionEvent.ACTION_MOVE -> {
                         val dx = e.rawX - tx
                         val dy = e.rawY - ty
-                        if (!moved && (Math.abs(dx) > slop || Math.abs(dy) > slop)) moved = true
+                        if (!moved && (Math.abs(dx) > slop || Math.abs(dy) > slop)) {
+                            moved = true
+                            // палец поехал — удержание отменяется
+                            handler.removeCallbacks(longPressClose)
+                        }
                         if (moved) {
                             p.x = sx + dx.toInt()
                             p.y = sy + dy.toInt()
@@ -1175,13 +1188,18 @@ class ClickService : AccessibilityService() {
                         return true
                     }
                     MotionEvent.ACTION_UP -> {
-                        if (!moved) {
+                        handler.removeCallbacks(longPressClose)
+                        if (!moved && !longPressFired) {
                             haptic()
                             expandFromBubble()
-                        } else {
+                        } else if (moved) {
                             // ФИЧА (v23): позиция пузыря запоминается после драга
                             savePos(KEY_BUBBLE_X, KEY_BUBBLE_Y, p.x, p.y)
                         }
+                        return true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        handler.removeCallbacks(longPressClose)
                         return true
                     }
                 }
@@ -1194,6 +1212,41 @@ class ClickService : AccessibilityService() {
         bubble?.let { runCatching { wm.removeView(it) } }
         bubble = null
         bubbleIcon = null
+    }
+
+    /**
+     * ФИКС (v26): полное скрытие плавающего интерфейса БЕЗ выключения службы
+     * Accessibility. Раньше кнопка ✕ панели вызывала disableSelf() — тумблер
+     * службы в системных настройках сбрасывался, и при каждом запуске
+     * приложения приходилось заново выдавать права Accessibility. Теперь
+     * служба живёт, пока пользователь не выключит её сам в настройках;
+     * панель возвращается при открытии приложения
+     * (MainActivity.onResume -> ensureOverlays).
+     * Вызывается из кнопки ✕ панели и из удержания пузыря.
+     * Все шаги идемпотентны: stopPlayback/stopRecordingInternal выходят
+     * рано, hide* переживают повторный вызов — можно жать на что угодно.
+     */
+    private fun closeAllOverlays() {
+        closeDelayEditor()
+        stopPlayback()           // no-op, если не играет
+        stopRecordingInternal()  // no-op, если не идёт запись
+        hidePresetList()
+        hideBubble()
+        hideCrosshair()
+        hideMtwsMarkers()
+        panel?.let { runCatching { wm.removeView(it) } }
+        panel = null
+        tvStatus = null
+        toggleBtn = null
+        tvCounter = null
+        presetsBtnRef = null
+        crosshairBtnRef = null
+        tvPresetName = null
+        tvDelayValue = null
+        tvProgress = null
+        prevBtnRef = null
+        nextBtnRef = null
+        toast("Панель скрыта — откройте приложение, чтобы вернуть")
     }
 
     /** ФИЧА: иконка пузыря = «развернуть панель» (двойная диагональная стрелка).
