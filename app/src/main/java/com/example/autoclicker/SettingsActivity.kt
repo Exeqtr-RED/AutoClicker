@@ -80,15 +80,6 @@ class SettingsActivity : AppCompatActivity() {
     // не удерживается службой
     private var pendingPickCb: ((Int, Int) -> Unit)? = null
     private var pendingRecordCb: ((List<PresetAction>) -> Unit)? = null
-    // ФИКС (v20): ждёт страховочного восстановления оконного режима после
-    // возврата из pick/записи (см. restoreWindowedGeometryIfNeeded)
-    private var pendingGeomRestore = false
-    // ФИКС (v22): ОДНА попытка перезапуска с границами на сессию возврата —
-    // защита от цикла «перезапуск -> onResume -> снова перезапуск».
-    // Сбрасывается в scheduleGeomRestore() при каждом НОВОМ возврате
-    // (из pick/записи): consume-результат к тому времени пуст, поэтому
-    // onResume после перезапуска scheduleGeomRestore не вызывает
-    private var geomReboundDone = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -236,16 +227,12 @@ class SettingsActivity : AppCompatActivity() {
             pickedY = y
             updatePickedPointLabel()
             toast("Точка: $x, $y")
-            // ФИКС (v20): страховочное восстановление оконного режима
-            scheduleGeomRestore()
         }
         ClickService.instance?.consumeRecordResult()?.let { actions ->
             recordedActions = actions.toMutableList()
             updateRecCount()
             rebuildActionsList()
             toast("Записано: ${actions.size} — отредактируйте задержки")
-            // ФИКС (v20): то же для возврата после записи
-            scheduleGeomRestore()
         }
         syncPlaybackState()
     }
@@ -297,8 +284,8 @@ class SettingsActivity : AppCompatActivity() {
             toast("Нельзя выбирать точку во время записи/воспроизведения")
             return
         }
-        // ФИКС (v18): запоминаем задачу — служба поднимет её ЦЕЛИКОМ
-        // (сохранится оконный режим), и пишем черновик — окно может быть
+        // ФИКС (v18): запоминаем задачу — служба поднимёт её ЦЕЛИКОМ,
+        // и пишем черновик — окно может быть
         // уничтожено системой, пока мы в фоне
         svc.noteEditorTask(taskId)
         writeDraft()
@@ -535,22 +522,8 @@ class SettingsActivity : AppCompatActivity() {
             o.put("pickedX", pickedX)
             o.put("pickedY", pickedY)
             o.put("actions", arr.toString())
-            // ФИКС (v19): границы окна в координатах экрана — служба поднимет
-            // редактор В ТОМ ЖЕ оконном режиме и с тем же размером/позицией.
-            // Геометрия снимается пока окно ещё живо и разложено (writeDraft
-            // вызывается перед moveTaskToBack). Семантика:
-            //   "l,t,r,b" — окно было оконным, вернуть в этих границах;
-            //   ""        — окно было во весь экран, вернуть во весь экран
-            //               (устаревшие границы затираем!);
-            //   нет ключа — неизвестно (окно не успело разложиться/ошибка):
-            //               прежнее поведение (moveTaskToFront / fallback)
             val ed = getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE).edit()
             ed.putString(draftKey(), o.toString())
-            when (val g = captureWindowGeomPref()) {
-                null -> {}
-                "" -> ed.remove("win_geom")
-                else -> ed.putString("win_geom", g)
-            }
             ed.commit()
         }
     }
@@ -595,124 +568,8 @@ class SettingsActivity : AppCompatActivity() {
     private fun clearDraft() {
         runCatching {
             getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE)
-                .edit().remove(draftKey()).remove("win_geom").commit()
+                .edit().remove(draftKey()).commit()
         }
-    }
-
-    /** ФИКС (v20): страховка восстановления оконного режима, шаг 1.
-     *  Служба поднимает редактор с сохранёнными границами
-     *  (ActivityOptions.setLaunchBounds), но часть прошивок (MIUI/HyperOS
-     *  «свободные окна») их молча игнорирует и распахивает окно на весь
-     *  экран. post{} — как у updateBackButtonVisibility: сразу после
-     *  onResume decorView ещё не разложен, мерить рано.
-     *  ФИКС (v22): каждая новая сессия возврата получает ОДНУ свежую
-     *  попытку перезапуска (флаг сбрасывается здесь) */
-    private fun scheduleGeomRestore() {
-        pendingGeomRestore = true
-        geomReboundDone = false
-        window.decorView.post { restoreWindowedGeometryIfNeeded() }
-    }
-
-    /** ФИКС (v20→v22): шаг 2 — применяется ОДИН раз после возврата из
-     *  pick/записи. Если окно уже оконное (setLaunchBounds сработал) —
-     *  не мешаем; если преф win_geom говорит «было во весь экран» (ключа
-     *  нет) — тоже. Иначе просим СЛУЖБУ перезапустить редактор с
-     *  сохранёнными границами (ClickService.reboundEditorWindow).
-     *  ФИКС (v22): прежняя страховка правила окно напрямую —
-     *  window.setLayout + gravity TOP|START + x/y. На прошивках с
-     *  «неосведомлённым» freeform (MIUI/HyperOS: активность размечена в
-     *  координатах всего экрана, система масштабирует её в окно) это
-     *  ломало рендер — в окне оставалась часть приложения, остальное
-     *  было белым. Перезапуск с setLaunchBounds — тот же путь, что и
-     *  после pick: рендер не трогаем, окно раскладывает система.
-     *  Прошивка, игнорирующая bounds на перезапуске, оставит окно во
-     *  весь экран — как до v20 (не хуже). Живое окно получит onNewIntent
-     *  без пересоздания — введённые поля не пропадут */
-    private fun restoreWindowedGeometryIfNeeded() {
-        if (!pendingGeomRestore) return
-        pendingGeomRestore = false
-        if (!isWindowFullscreen()) return
-        val g = readSavedWinGeom() ?: return
-        // ФИКС (v22): границы, снятые на «неосведомлённом» freeform, могут
-        // совпадать со всем экраном — такой перезапуск бессмыслен
-        if (isNearlyFullscreenBounds(g)) return
-        val svc = ClickService.instance ?: return
-        if (geomReboundDone) return
-        geomReboundDone = true
-        svc.reboundEditorWindow(g, mode)
-    }
-
-    /** ФИКС (v22): сохранённые границы почти совпадают с целым экраном —
-     *  считаем их устаревшими (сняты в полноэкранном состоянии или на
-     *  «неосведомлённом» freeform) и не перезапускаем. Пороги те же, что
-     *  в isWindowFullscreen: >=90% ширины и >=85% высоты */
-    private fun isNearlyFullscreenBounds(g: android.graphics.Rect): Boolean {
-        return runCatching {
-            val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
-            val realW: Int
-            val realH: Int
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                val b = wm.maximumWindowMetrics.bounds
-                realW = b.width(); realH = b.height()
-            } else {
-                @Suppress("DEPRECATION")
-                val m = android.util.DisplayMetrics()
-                @Suppress("DEPRECATION")
-                wm.defaultDisplay.getRealMetrics(m)
-                realW = m.widthPixels; realH = m.heightPixels
-            }
-            g.width() >= realW * 0.9f && g.height() >= realH * 0.85f
-        }.getOrDefault(false)
-    }
-
-    /** ФИКС (v20): читает сохранённые границы win_geom ("l,t,r,b") из префов
-     *  черновика (те же, что пишет writeDraft и читает ClickService).
-     *  null — окно было во весь экран (ключа нет) или значение битое.
-     *  Формат и порог 100×100 совпадают с ClickService.readEditorWindowGeometry */
-    private fun readSavedWinGeom(): android.graphics.Rect? {
-        return runCatching {
-            val s = getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE)
-                .getString("win_geom", null) ?: return null
-            val p = s.split(',')
-            if (p.size != 4) return null
-            val r = android.graphics.Rect(
-                p[0].trim().toIntOrNull() ?: return null,
-                p[1].trim().toIntOrNull() ?: return null,
-                p[2].trim().toIntOrNull() ?: return null,
-                p[3].trim().toIntOrNull() ?: return null
-            )
-            if (r.width() < 100 || r.height() < 100) null else r
-        }.getOrNull()
-    }
-
-    /** ФИКС (v19): подготовленное значение для префа win_geom.
-     *  Вернёт:
-     *   — "l,t,r,b", если окно ОКОННОЕ (границы для возврата);
-     *   — "", если окно во весь экран (устаревшие границы надо стереть);
-     *   — null, если окно ещё не разложено (0×0 — например, уничтожение
-     *     в фоне) или при ошибке: преф НЕ трогаем, там уже валидное
-     *     значение от предыдущего сворачивания.
-     *  API 30+: точные границы окна из currentWindowMetrics;
-     *  ниже — позиция decorView на экране */
-    private fun captureWindowGeomPref(): String? {
-        return runCatching {
-            val d = window.decorView
-            if (d.width <= 0 || d.height <= 0) return null
-            if (isWindowFullscreen()) return ""
-            val b: android.graphics.Rect =
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                    val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
-                    wm.currentWindowMetrics.bounds
-                } else {
-                    val loc = IntArray(2)
-                    d.getLocationOnScreen(loc)
-                    android.graphics.Rect(loc[0], loc[1], loc[0] + d.width, loc[1] + d.height)
-                }
-            // отсекаем вырожденные размеры: восстановление в окно меньше
-            // 100×100 бессмысленно — считаем такое «неизвестным»
-            if (b.width() < 100 || b.height() < 100) null
-            else "${b.left},${b.top},${b.right},${b.bottom}"
-        }.getOrNull()
     }
 
     // ---------- Запись ----------

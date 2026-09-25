@@ -3,12 +3,10 @@ package com.example.autoclicker
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.app.ActivityManager
-import android.app.ActivityOptions
 import android.content.Context
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.PixelFormat
-import android.graphics.Rect
 // ФИЧА (v24): редактор задержки ST на плавающей панели (числовой ввод)
 import android.text.InputFilter
 import android.text.InputType
@@ -1724,6 +1722,9 @@ class ClickService : AccessibilityService() {
         actionIndex = sIdx
         cycleCount = 0
         startTimeMs = System.currentTimeMillis()
+        // ФИКС (v29): «промывка» диспетчера — застрявший в очереди прошивки
+        // штрих прошлой сессии отменяется новым dispatchGesture
+        cancelStaleGesture()
         gestureInFlight = false
         consecutiveCancels = 0
         clickCount = 0
@@ -1767,6 +1768,16 @@ class ClickService : AccessibilityService() {
     fun stopPlayback() {
         if (!playing) return
         playing = false
+        // ФИКС (v29): «призрачный клик» после остановки. dispatchGesture
+        // асинхронен: если инжекция совпала с физическим касанием экрана
+        // (палец на кнопке панели или касание во время работы пресета),
+        // часть прошивок (MIUI/HyperOS) НЕ проигрывает штрих сразу, а
+        // ставит его в очередь системного ввода и проигрывает при
+        // СЛЕДУЮЩЕМ касании — тап доигрывается в точке пресета уже после
+        // остановки. removeCallbacks снимает только наши колбэки —
+        // застрявшему в очереди СИСТЕМЫ штриху он не указ. Новый
+        // dispatchGesture по контракту отменяет текущие жесты сервиса
+        cancelStaleGesture()
         gestureInFlight = false
         // ФИЧА (v24): ручная навигация продолжает с места остановки — последним
         // выполненным считаем действие, на котором playback остановился.
@@ -1801,6 +1812,29 @@ class ClickService : AccessibilityService() {
         updatePanelState()
         updateBubbleIcon()
         dbg { "stopPlayback" }
+    }
+
+    /** ФИКС (v29): «промывка» диспетчера жестов. Диспатчится безобидный
+     *  1-мс штрих в углу экрана (1,1)->(2,2): по контракту dispatchGesture
+     *  система отменяет все текущие жесты ЭТОГО сервиса, включая штрих,
+     *  застрявший в очереди ввода. Отдельный колбэк БЕЗ счётчиков:
+     *  отменённый/завершённый flush не должен попадать в clickCount
+     *  и не должен накручивать consecutiveCancels (иначе возможны
+     *  ложные «Жесты блокируются») */
+    private val flushCallback = object : GestureResultCallback() {}
+
+    private fun cancelStaleGesture() {
+        if (!gestureInFlight) return
+        val path = Path().apply { moveTo(1f, 1f); lineTo(2f, 2f) }
+        val stroke = GestureDescription.StrokeDescription(path, 0L, 1L)
+        val g = GestureDescription.Builder().addStroke(stroke).build()
+        val ok = runCatching { dispatchGesture(g, flushCallback, null) }
+            .getOrElse { e ->
+                Log.e(TAG, "dispatchGesture(flush) error", e)
+                false
+            }
+        dbg { "cancelStaleGesture ok=$ok" }
+        gestureInFlight = false
     }
 
     private val gestureCallback = object : GestureResultCallback() {
@@ -2038,33 +2072,21 @@ class ClickService : AccessibilityService() {
      *  Запуск строго ИЗ КОНТЕКСТА СЛУЖБЫ — активити из фона поднимать
      *  нельзя (ограничения Android 10+), служба с выданным
      *  SYSTEM_ALERT_WINDOW — можно.
-     *  ФИКС (v19): если перед сворачиванием окно было ОКОННЫМ, оно
-     *  поднимается startActivity'ем с СОХРАНЁННЫМИ ГРАНИЦАМИ
-     *  (ActivityOptions.setLaunchBounds) — плавающее окно возвращается
-     *  плавающим, с прежним размером и позицией, даже если систему
-     *  задачу/активность убила прошивка. Для полноэкранного окна —
-     *  прежний путь v18: ПОДНЯТЬ ЗАДАЧУ ЦЕЛИКОМ (moveTaskToFront,
-     *  REORDER_TASKS), а при её отсутствии — startActivity */
+     *  ФИКС (v30): попытки вернуть окно ПЛАВАЮЩИМ удалены (механика
+     *  v19-v22 + переключатель v28): на MIUI/HyperOS задача со «свободными
+     *  окнами» рисуется корректно, но мапит КАСАНИЯ со сдвигом. Редактор
+     *  теперь ВСЕГДА возвращается обычным запуском: сначала ПОДНЯТЬ
+     *  ЗАДАЧУ ЦЕЛИКОМ (moveTaskToFront, REORDER_TASKS), а при её
+     *  отсутствии — startActivity */
     private fun bringBackSettingsEditor(mode: String = "MTWS") {
         val tid = editorTaskId
         editorTaskId = -1
-        // ФИКС (v19): окно было оконным — поднимаем с сохранёнными
-        // границами. REORDER_TO_FRONT поднимет живую активность,
-        // убитая системой создастся заново (поля вернёт черновик) —
-        // в обоих случаях границы применяются к задаче. На прошивках
-        // без поддержки свободных окон bounds молча игнорируются — безопасно
-        val geom = readEditorWindowGeometry()
-        if (geom != null && runCatching { launchEditorWithBounds(geom, mode) }
-                .onFailure { Log.e(TAG, "bringBackSettingsEditor: bounded launch failed", it) }
-                .getOrDefault(false)) {
-            return
-        }
-        // ФИКС (v18→v19): подъём задачи целиком сохранён для полноэкранного
-        // случая. Нюанс: moveTaskToFront НЕ БРОСАЕТ исключение, если задачи
-        // уже нет — раньше метод просто выходил, и окно не возвращалось
-        // НИКОГДА. Теперь после moveTaskToFront ВСЕГДА дублируем запуск с
-        // REORDER_TO_FRONT: живая активность получит onNewIntent (дубликата
-        // не будет), уничтоженная — создастся заново с черновиком
+        // Подъём задачи целиком. Нюанс: moveTaskToFront НЕ БРОСАЕТ
+        // исключение, если задачи уже нет — раньше метод просто выходил,
+        // и окно не возвращалось НИКОГДА. Теперь после moveTaskToFront
+        // ВСЕГДА дублируем запуск с REORDER_TO_FRONT: живая активность
+        // получит onNewIntent (дубликата не будет), уничтоженная —
+        // создастся заново с черновиком
         if (tid != -1 && runCatching { bringTaskToFront(tid) }
                 .onFailure { Log.e(TAG, "bringTaskToFront($tid) failed", it) }
                 .getOrDefault(false)) {
@@ -2074,29 +2096,6 @@ class ClickService : AccessibilityService() {
         }
         runCatching { launchEditorPlain(mode) }
             .onFailure { Log.e(TAG, "bringBackSettingsEditor: failed", it) }
-    }
-
-    /** ФИКС (v19): границы окна редактора, сохранённые активностью перед
-     *  сворачиванием (преф win_geom в editor_draft_v1, формат "l,t,r,b"),
-     *  либо null — окно было во весь экран / геометрия неизвестна.
-     *  Всё в runCatching: битое значение не должно ломать возврат */
-    private fun readEditorWindowGeometry(): Rect? {
-        return runCatching {
-            // имя файла префов совпадает с SettingsActivity.DRAFT_PREFS
-            // (константа там private — дублируем литералом)
-            val s = getSharedPreferences("editor_draft_v1", Context.MODE_PRIVATE)
-                .getString("win_geom", null) ?: return null
-            val p = s.split(',')
-            if (p.size != 4) return null
-            val r = Rect(
-                p[0].trim().toIntOrNull() ?: return null,
-                p[1].trim().toIntOrNull() ?: return null,
-                p[2].trim().toIntOrNull() ?: return null,
-                p[3].trim().toIntOrNull() ?: return null
-            )
-            if (r.width() < 100 || r.height() < 100) return null
-            r
-        }.getOrNull()
     }
 
     /** ФИКС (v19): интент редактора — общий для обоих путей запуска */
@@ -2113,39 +2112,10 @@ class ClickService : AccessibilityService() {
         return true
     }
 
-    /** ФИКС (v19): запуск с восстановлением границ окна — вернёт окно
-     *  в тот же оконный режим, размер и позицию, что были перед сворачиванием */
-    private fun launchEditorWithBounds(r: Rect, mode: String): Boolean {
-        val opts = ActivityOptions.makeBasic()
-        opts.setLaunchBounds(r)
-        startActivity(editorIntent(mode), opts.toBundle())
-        return true
-    }
-
-    /** ФИКС (v22): безопасная страховка оконного режима. Активность сообщает,
-     *  что вернулась во весь экран, хотя до сворачивания была оконной, —
-     *  служба ПЕРЕЗАПУСКАЕТ редактор с сохранёнными границами (тот же
-     *  проверенный путь, что и после pick: NEW_TASK|REORDER_TO_FRONT +
-     *  setLaunchBounds). Живое окно получит onNewIntent БЕЗ пересоздания
-     *  (все введённые поля сохраняются), уничтоженное — создастся заново
-     *  и вернёт черновик. Раньше (v20) активность сама правила окно через
-     *  window.setLayout + gravity — на прошивках с «неосведомлённым»
-     *  freeform (MIUI/HyperOS раскладывают активность в координатах всего
-     *  экрана и масштабируют её в окно) это ломало рендер: в окне было
-     *  видно только часть приложения, остальное — белое. Перезапуск же
-     *  ничего не ломает: прошивка, игнорирующая bounds, просто оставит
-     *  окно во весь экран (поведение до v20, не хуже) */
-    fun reboundEditorWindow(bounds: Rect, mode: String) {
-        runCatching {
-            val opts = ActivityOptions.makeBasic()
-            opts.setLaunchBounds(bounds)
-            startActivity(editorIntent(mode), opts.toBundle())
-        }.onFailure { Log.e(TAG, "reboundEditorWindow failed", it) }
-    }
-
-    /** ФИКС (v18): поднять задачу как есть — из недавних так сохраняется
-     *  и оконный режим, и размер окна. Ошибка (задачи нет / отказ ОС)
-     *  вернёт false — вызывающий уйдёт в fallback через startActivity */
+    /** ФИКС (v18): поднять задачу редактора целиком — из недавних задача
+     *  возвращается в том состоянии, в котором была. Ошибка (задачи нет /
+     *  отказ ОС) вернёт false — вызывающий уйдёт в fallback через
+     *  startActivity */
     private fun bringTaskToFront(taskId: Int): Boolean {
         val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         am.moveTaskToFront(taskId, 0)
