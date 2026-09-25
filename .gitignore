@@ -13,3 +13,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+# ФИКС (v31): сборочные артефакты не хранятся в git —
+# APK публикуется в Releases, а не коммитится в репозиторий
+dist/
+app/release/

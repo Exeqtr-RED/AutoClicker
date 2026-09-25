@@ -156,6 +156,12 @@ class ClickService : AccessibilityService() {
     // (без NOT_FOCUSABLE, иначе клавиатура не откроется)
     private var delayEditor: View? = null
 
+    // ФИЧА (v31): невидимое окно 1×1 с FLAG_KEEP_SCREEN_ON — держит экран
+    // включённым ПОКА ИДЁТ воспроизведение. Отдельное от панели окно, потому
+    // что панель/пузырь могут быть скрыты (✕, сворачивание), а флаг
+    // должен жить ровно столько, сколько играет пресет
+    private var screenOnOverlay: View? = null
+
     // ФИЧА (v25): строка прогресса MTWS на панели — номер выполняемого
     // действия и обратный отсчёт до следующего (на месте бывшей паузы)
     private var tvProgress: TextView? = null
@@ -348,6 +354,8 @@ class ClickService : AccessibilityService() {
             pickOverlay?.let { runCatching { wm.removeView(it) } }
             // ФИЧА (v24): окно редактора задержки — тоже чистим
             delayEditor?.let { runCatching { wm.removeView(it) } }
+            // ФИЧА (v31): окно «экран не гаснет» — тоже чистим
+            screenOnOverlay?.let { runCatching { wm.removeView(it) } }
             hideMtwsMarkers()
         }
         // ФИКС (утечка памяти): колбэки и результаты — вместе с окнами
@@ -365,6 +373,7 @@ class ClickService : AccessibilityService() {
         recordStopBtn = null
         recCountOverlayRef = null
         delayEditor = null
+        screenOnOverlay = null
         tvProgress = null
         super.onDestroy()
     }
@@ -1729,6 +1738,9 @@ class ClickService : AccessibilityService() {
         consecutiveCancels = 0
         clickCount = 0
         playing = true
+        // ФИЧА (v31): экран не гаснет, пока играет пресет (паузы MTWS
+        // бывают длинными — при затухании дисплея жесты перестают попадать)
+        showScreenOnOverlay()
         // ФИЧА (v24/v27): позиция навигации = стартовая; редактор задержки
         // закрывается — фокус уходит панели
         manualIndex = sIdx
@@ -1768,6 +1780,8 @@ class ClickService : AccessibilityService() {
     fun stopPlayback() {
         if (!playing) return
         playing = false
+        // ФИЧА (v31): экран больше не удерживается включённым
+        hideScreenOnOverlay()
         // ФИКС (v29): «призрачный клик» после остановки. dispatchGesture
         // асинхронен: если инжекция совпала с физическим касанием экрана
         // (палец на кнопке панели или касание во время работы пресета),
@@ -1812,6 +1826,47 @@ class ClickService : AccessibilityService() {
         updatePanelState()
         updateBubbleIcon()
         dbg { "stopPlayback" }
+    }
+
+    /** ФИЧА (v31): экран НЕ гаснет во время воспроизведения.
+     *  Невидимое окно 1×1 в углу экрана с FLAG_KEEP_SCREEN_ON: пока такое
+     *  окно видимо, система не выключает дисплей по таймауту. Стандартный
+     *  приём для оверлеев: флаг работает на уровне ОКНА (не области) —
+     *  достаточно 1×1 пикселя. Окно сделано FLAG_NOT_TOUCHABLE (не мешает
+     *  жестам и dispatchGesture) и FLAG_NOT_FOCUSABLE (не отбирает фокус
+     *  у приложений и клавиатуры). Отдельно от панели, потому что панель
+     *  может пересоздаваться/скрываться, а флаг должен держаться ровно
+     *  на время playback; снимается в stopPlayback (в т.ч. из ✕) и в onDestroy */
+    private fun showScreenOnOverlay() {
+        if (screenOnOverlay != null) return
+        if (!::wm.isInitialized) return
+        runCatching {
+            val v = View(this)
+            val p = WindowManager.LayoutParams(
+                1,
+                1,
+                overlayType(),
+                overlayFlags(
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                ),
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = 0
+                y = 0
+            }
+            wm.addView(v, p)
+            screenOnOverlay = v
+        }.onFailure { Log.e(TAG, "showScreenOnOverlay failed", it) }
+    }
+
+    /** ФИЧА (v31): снять окно «экран не гаснет» (остановка playback,
+     *  ✕ через closeAllOverlays -> stopPlayback, уничтожение службы) */
+    private fun hideScreenOnOverlay() {
+        screenOnOverlay?.let { runCatching { wm.removeView(it) } }
+        screenOnOverlay = null
     }
 
     /** ФИКС (v29): «промывка» диспетчера жестов. Диспатчится безобидный

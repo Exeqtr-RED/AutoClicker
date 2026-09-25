@@ -1,6 +1,7 @@
 package com.example.autoclicker
 
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -235,6 +236,27 @@ class SettingsActivity : AppCompatActivity() {
             toast("Записано: ${actions.size} — отредактируйте задержки")
         }
         syncPlaybackState()
+    }
+
+    /** ФИКС (v31): служба поднимает редактор с FLAG_ACTIVITY_REORDER_TO_FRONT
+     *  и extra "mode". Если экземпляр активити ЖИВ, он получает intent
+     *  через onNewIntent — раньше extra терялась (mode читается только
+     *  в onCreate), и при кросс-режимном возврате (например, редактор ST
+     *  был свёрнут, а остановилась запись MTWS) поднималось окно с НЕ ТОЙ
+     *  вкладкой. Теперь: intent обновляется, а при смене режима окно
+     *  пересоздаётся (UI вкладок строится в onCreate). Введённое не
+     *  теряется: recreate() вызывает onDestroy с isFinishing=false —
+     *  сработает writeDraft(), а поля формы система восстанавливает
+     *  сама (view-state). Если режим совпадает — ничего не делаем,
+     *  наNewIntent работает как раньше (без пересоздания) */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val newMode = intent.getStringExtra("mode")
+        if (newMode != null && newMode != mode) {
+            mode = newMode
+            recreate()
+        }
     }
 
     override fun onDestroy() {
