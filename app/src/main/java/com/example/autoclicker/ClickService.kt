@@ -136,8 +136,9 @@ class ClickService : AccessibilityService() {
 
     // Панель
     private var panel: View? = null
-    private var tvStatus: TextView? = null
     private var toggleBtn: ImageButton? = null
+    // v32: tvStatus (индикатор ● в шапке) удалён вместе с view — состояние
+    // теперь читается только по иконке кнопки play (play/стоп/REC)
 
     // ФИЧА: счётчик кликов/таймер на панели
     private var tvCounter: TextView? = null
@@ -493,7 +494,6 @@ class ClickService : AccessibilityService() {
             return
         }
 
-        tvStatus = v.findViewById(R.id.tvStatus)
         toggleBtn = v.findViewById(R.id.toggleBtn)
         tvCounter = v.findViewById(R.id.tvCounter)
         presetsBtnRef = v.findViewById(R.id.presetsBtn)
@@ -566,7 +566,10 @@ class ClickService : AccessibilityService() {
             if (playing) {
                 stopPlayback()
             } else {
-                lastPreset?.let { startPlayback(it) }
+                // ФИКС (v34): play стартует С ВЫБРАННОЙ ПОЗИЦИИ (перемотка
+                // ◀/▶ больше не запускает скрипт — только выбирает её);
+                // свежий пресет — manualIndex = 0, т.е. с первого действия
+                lastPreset?.let { startPlayback(it, manualIndex) }
                     ?: toast("Сначала выберите пресет (☰)")
             }
         }
@@ -601,24 +604,26 @@ class ClickService : AccessibilityService() {
     }
 
     private fun updatePanelState() {
-        val st = tvStatus ?: return
+        // ФИКС (v32): раньше первой строкой был «val st = tvStatus ?: return» —
+        // после удаления индикатора ● он всегда был бы null, и ВСЯ панель
+        // (иконка play, имя пресета, задержка, прогресс) перестала бы
+        // обновляться. Ранний return убран, состояние — только по иконке play:
+        // REC = запись, стоп = играет, play = простой
         val tg = toggleBtn ?: return
         when {
             recording -> {
-                // ФИКС (v23): красный = ЗАПИСЬ (классический REC). Раньше
-                // красным горел ПРОСТОЙ — цвет читался как «идёт запись»
-                st.text = "●"; st.setTextColor(0xFFFF4B4B.toInt())
+                // ФИЧА (v34): цветовые состояния кнопки — запись = СИНЯЯ пилюля
+                tg.setBackgroundResource(R.drawable.btn_rec_blue)
                 tg.setImageResource(R.drawable.ic_rec); tg.isEnabled = false
             }
             playing -> {
-                // v25: пауза удалена — во время playback статус всегда зелёный
-                st.text = "●"; st.setTextColor(0xFF00CC44.toInt())
+                // ФИЧА (v34): играет = КРАСНАЯ пилюля стоп
+                tg.setBackgroundResource(R.drawable.btn_stop)
                 tg.setImageResource(R.drawable.ic_stop); tg.isEnabled = true
             }
             else -> {
-                // ФИКС (v23): простой = СЕРЫЙ (нейтральный). Раньше был красный —
-                // тот же цвет, что у записи, из-за чего простой путался с REC
-                st.text = "●"; st.setTextColor(0xFF9E9E9E.toInt())
+                // ФИЧА (v34): простой = ЗЕЛЁНАЯ пилюля play
+                tg.setBackgroundResource(R.drawable.btn_play_green)
                 tg.setImageResource(R.drawable.ic_play); tg.isEnabled = lastPreset != null
             }
         }
@@ -686,26 +691,14 @@ class ClickService : AccessibilityService() {
         tv.text = "%d · %02d:%02d".format(clickCount, secs / 60, secs % 60)
     }
 
-    /** ФИЧА (v25): формат обратного отсчёта до следующего действия.
-     *  От минуты и выше — «М:СС» (долгие паузы не пугают десятками
-     *  сотен секунд), от 10 секунд — целые секунды, меньше — с десятыми
-     *  («3,4 с»). Отрицательный остаток (жест ещё летит) — «0,0 с» */
-    private fun formatCountdown(ms: Long): String {
-        val m = ms.coerceAtLeast(0L)
-        val sec = m / 1000L
-        return when {
-            sec >= 60L -> "${sec / 60L}:${"%02d".format(sec % 60L)}"
-            sec >= 10L -> "$sec с"
-            else -> "${sec},${(m % 1000L) / 100L} с"
-        }
-    }
-
     /**
      * ФИЧА (v25): строка прогресса MTWS на панели — на месте бывшей кнопки
-     * паузы. В playback: «Тап 2/5 · 3,4 с» — номер выполняемого действия
-     * и обратный отсчёт до следующего (обновляется тикером каждые 100 мс;
-     * после последнего действия цикла отсчёт идёт до ПОВТОРА списка —
-     * периодичность repeatIntervalMs). В простое: «Действий: N».
+     * паузы. ФОРМАТ (v35): «Клик 1/15» / «Свайп 3/15» — вид действия,
+     * номер ТЕКУЩЕГО действия и всего записанных действий пресета.
+     * В playback это выполняемое сейчас действие (progressActionNo,
+     * обновляется тикером каждые 100 мс), в простое — ВЫБРАННОЕ
+     * перемоткой ◀/▶ (manualIndex; ничего не выбрано — первое действие).
+     * Обратный отсчёт до следующего действия убран (v35).
      * Для ST-пресетов строка скрыта целиком — её место занимает поле задержки
      */
     private fun updateProgress() {
@@ -713,14 +706,13 @@ class ClickService : AccessibilityService() {
         val preset = lastPreset ?: return
         if (preset.mode != "MTWS" || preset.actions.isEmpty()) return
         val size = preset.actions.size
-        if (!playing) {
-            pv.text = "Действий: $size"
-            return
-        }
-        val no = progressActionNo.coerceIn(1, size)
-        val kind = if (preset.actions[no - 1].type == "tap") "Тап" else "Свайп"
-        val remain = nextActionAtMs - SystemClock.elapsedRealtime()
-        pv.text = "$kind $no/$size · ${formatCountdown(remain)}"
+        // ФИЧА (v35): в playback — выполняемое действие (progressActionNo,
+        // 1-based), в простое — выбранная перемоткой позиция старта
+        // (manualIndex, 0-based; по умолчанию — первое действие)
+        val idx = if (playing) progressActionNo.coerceIn(1, size) - 1
+                  else manualIndex.coerceIn(0, size - 1)
+        val kind = if (preset.actions[idx].type == "tap") "Клик" else "Свайп"
+        pv.text = "$kind ${idx + 1}/$size"
     }
 
     // ============================================================
@@ -739,11 +731,14 @@ class ClickService : AccessibilityService() {
      * ближайшего тика (removeCallbacks(tick) + post(tick)), а все проверки
      * (летящий жест — цикл 20 мс, перенос цикла, лимит CYCLES) выполняет
      * сам tick — ЕДИНСТВЕННЫЙ источник исполнения действий.
-     * В ПРОСТОЕ: запуск пресета С ВЫБРАННОЙ ПОЗИЦИИ — ▶ стартует со
-     * следующего за manualIndex действия (после последнего — с первого,
-     * циклично), ◀ — с предыдущего (на первом — с первого, повтор).
-     * Позиция хранится в manualIndex; после остановки playback продолжает
-     * с места остановки (stopPlayback). Во время ЗАПИСИ перемотка запрещена.
+     * ФИКС (v34): В ПРОСТОЕ перемотка больше НЕ ЗАПУСКАЕТ скрипт — только
+     * выбирает позицию старта (manualIndex): ▶ — следующее действие,
+     * ◀ — предыдущее (на первом — остаётся, после последнего — цикл к
+     * первому). Выбранная позиция видна в строке прогресса («старт: N»).
+     * ЗАПУСК — только с кнопки play (панель/пузырь), причём play стартует
+     * С ВЫБРАННОЙ ПОЗИЦИИ — startPlayback(it, manualIndex).
+     * Выбранная позиция видна в строке прогресса («Клик N/M», v35).
+     * Во время ЗАПИСИ перемотка запрещена.
      */
     private fun seekStep(delta: Int) {
         val preset = lastPreset ?: return
@@ -773,16 +768,17 @@ class ClickService : AccessibilityService() {
             handler.removeCallbacks(tick)
             handler.post(tick)
         } else {
-            // Playback не идёт — старт пресета с выбранной позиции
+            // ФИКС (v34): перемотка в простое больше НЕ ЗАПУСКАЕТ скрипт —
+            // только выбирает позицию, с которой его запустит кнопка play
+            // (панель или пузырь). Раньше здесь был startPlayback(preset, idx)
             val t = if (delta < 0) {
                 if (manualIndex <= 0) 0 else manualIndex - 1
             } else {
                 if (manualIndex >= size - 1) 0 else manualIndex + 1
             }
-            val idx = t.coerceIn(0, size - 1)
-            manualIndex = idx
-            startPlayback(preset, idx)
-            toast("Старт с действия: ${idx + 1} из $size")
+            manualIndex = t.coerceIn(0, size - 1)
+            updateProgress()
+            toast("Выбрано действие: ${manualIndex + 1} из $size")
         }
     }
 
@@ -1120,7 +1116,6 @@ class ClickService : AccessibilityService() {
         hidePresetList()
         panel?.let { runCatching { wm.removeView(it) } }
         panel = null
-        tvStatus = null
         toggleBtn = null
         tvCounter = null
         presetsBtnRef = null
@@ -1168,16 +1163,17 @@ class ClickService : AccessibilityService() {
         }
         updateBubbleIcon()
 
-        // Тап (без движения) — развернуть панель, драг — переместить пузырь.
-        // ФИЧА (v26): УДЕРЖАНИЕ пузыря — полностью скрыть оверлеи (служба
-        // остаётся включённой; вернуть панель — открыть приложение)
+        // ФИЧА (v33): тап — СТАРТ/СТОП выбранного пресета (как кнопка play
+        // панели), УДЕРЖАНИЕ — развернуть панель обратно, драг — переместить.
+        // Раньше тап разворачивал панель, а удержание (v26) скрывало все
+        // оверлеи — это действие с пузыря снято, оно осталось за ✕ панели
         val slop = ViewConfiguration.get(this).scaledTouchSlop
         val longPressTimeout = ViewConfiguration.getLongPressTimeout().toLong()
         var longPressFired = false
-        val longPressClose = Runnable {
+        val longPressExpand = Runnable {
             longPressFired = true
             haptic()
-            closeAllOverlays()
+            expandFromBubble()
         }
         v.setOnTouchListener(object : View.OnTouchListener {
             var sx = 0; var sy = 0; var tx = 0f; var ty = 0f
@@ -1189,7 +1185,7 @@ class ClickService : AccessibilityService() {
                         tx = e.rawX; ty = e.rawY
                         moved = false
                         longPressFired = false
-                        handler.postDelayed(longPressClose, longPressTimeout)
+                        handler.postDelayed(longPressExpand, longPressTimeout)
                         return true
                     }
                     MotionEvent.ACTION_MOVE -> {
@@ -1198,7 +1194,7 @@ class ClickService : AccessibilityService() {
                         if (!moved && (Math.abs(dx) > slop || Math.abs(dy) > slop)) {
                             moved = true
                             // палец поехал — удержание отменяется
-                            handler.removeCallbacks(longPressClose)
+                            handler.removeCallbacks(longPressExpand)
                         }
                         if (moved) {
                             p.x = sx + dx.toInt()
@@ -1208,10 +1204,11 @@ class ClickService : AccessibilityService() {
                         return true
                     }
                     MotionEvent.ACTION_UP -> {
-                        handler.removeCallbacks(longPressClose)
+                        handler.removeCallbacks(longPressExpand)
                         if (!moved && !longPressFired) {
-                            haptic()
-                            expandFromBubble()
+                            // ФИЧА (v33): тап по пузырю = play/стоп выбранного
+                            // пресета — тот же сценарий, что у кнопки play панели
+                            bubbleTogglePlayback()
                         } else if (moved) {
                             // ФИЧА (v23): позиция пузыря запоминается после драга
                             savePos(KEY_BUBBLE_X, KEY_BUBBLE_Y, p.x, p.y)
@@ -1219,7 +1216,7 @@ class ClickService : AccessibilityService() {
                         return true
                     }
                     MotionEvent.ACTION_CANCEL -> {
-                        handler.removeCallbacks(longPressClose)
+                        handler.removeCallbacks(longPressExpand)
                         return true
                     }
                 }
@@ -1232,6 +1229,20 @@ class ClickService : AccessibilityService() {
         bubble?.let { runCatching { wm.removeView(it) } }
         bubble = null
         bubbleIcon = null
+    }
+
+    /** ФИЧА (v33): тап по пузырю — тот же сценарий, что у кнопки play панели:
+     *  играет → стоп; иначе старт выбранного пресета. На записи запуск
+     *  запрещён (у пузыря нет isEnabled, как у кнопки панели, — поэтому
+     *  честный тост вместо тихого игнора) */
+    private fun bubbleTogglePlayback() {
+        haptic()
+        when {
+            recording -> toast("Идёт запись — сначала остановите её")
+            playing -> stopPlayback()
+            else -> lastPreset?.let { startPlayback(it, manualIndex) }
+                ?: toast("Сначала выберите пресет (☰)")
+        }
     }
 
     /**
@@ -1256,7 +1267,6 @@ class ClickService : AccessibilityService() {
         hideMtwsMarkers()
         panel?.let { runCatching { wm.removeView(it) } }
         panel = null
-        tvStatus = null
         toggleBtn = null
         tvCounter = null
         presetsBtnRef = null
@@ -1269,16 +1279,29 @@ class ClickService : AccessibilityService() {
         toast("Панель скрыта — откройте приложение, чтобы вернуть")
     }
 
-    /** ФИЧА: иконка пузыря = «развернуть панель» (двойная диагональная стрелка).
-     *  Раньше стоял глиф «▶» — он выглядел как кнопка play, и пользователь мог
-     *  подумать, что тап запустит скрипт, хотя пузырь только разворачивает панель.
-     *  Форма теперь всегда означает «развернуть», а состояние лишь подсвечивается
-     *  цветом: серый — стоит, зелёный — играет (красный зарезервирован за записью,
-     *  цвета едины с точкой статуса панели — ФИКС v23) */
+    /** ФИЧА (v33): иконка пузыря = play/стоп — тап запускает и останавливает
+     *  выбранный пресет (раньше пузырь только разворачивал панель, и стояла
+     *  иконка «развернуть» ic_expand — специально НЕ play, чтобы не путать;
+     *  теперь семантика тапа совпадает с иконкой).
+     *  ФИЧА (v34): цвета едины с новой схемой кнопок —
+     *  ЗЕЛЁНЫЙ play — простой, КРАСНЫЙ стоп — играет,
+     *  СИНИЙ REC — идёт запись (тап заблокирован) */
     private fun updateBubbleIcon() {
         val iv = bubbleIcon ?: return
-        iv.setImageResource(R.drawable.ic_expand)
-        iv.setColorFilter(if (playing) 0xFF00CC44.toInt() else 0xFF9E9E9E.toInt())
+        when {
+            recording -> {
+                iv.setImageResource(R.drawable.ic_rec)
+                iv.setColorFilter(0xFF5B8CFF.toInt())   // accent_blue
+            }
+            playing -> {
+                iv.setImageResource(R.drawable.ic_stop)
+                iv.setColorFilter(0xFFFF4B4B.toInt())   // accent_red
+            }
+            else -> {
+                iv.setImageResource(R.drawable.ic_play)
+                iv.setColorFilter(0xFF00E676.toInt())   // accent_green
+            }
+        }
     }
 
     // ============================================================
@@ -1745,7 +1768,7 @@ class ClickService : AccessibilityService() {
         // закрывается — фокус уходит панели
         manualIndex = sIdx
         // ФИЧА (v25/v27): строка прогресса до первого тика покажет действие,
-        // с которого стартовали (1-based); при sIdx = 0 — как раньше («Тап 1/N»)
+        // с которого стартовали (1-based); при sIdx = 0 — как раньше («Клик 1/N»)
         progressActionNo = sIdx + 1
         nextActionAtMs = 0L
         closeDelayEditor()
@@ -1777,7 +1800,11 @@ class ClickService : AccessibilityService() {
         return true
     }
 
-    fun stopPlayback() {
+    /** ФИЧА (v34): resetToStart = true — остановка ПО ЕСТЕСТВЕННОМУ
+     *  завершению (кончились циклы/время): следующий старт — С ПЕРВОГО
+     *  действия. Ручной стоп (кнопка/ошибка жестов) сохраняет позицию
+     *  для продолжения с места остановки */
+    fun stopPlayback(resetToStart: Boolean = false) {
         if (!playing) return
         playing = false
         // ФИЧА (v31): экран больше не удерживается включённым
@@ -1799,7 +1826,10 @@ class ClickService : AccessibilityService() {
         // действие списка; если не выполнилось ни одного — первое
         val sp = currentPreset
         if (sp != null && sp.mode == "MTWS" && sp.actions.isNotEmpty()) {
-            manualIndex = when {
+            // ФИЧА (v34): естественное завершение — сброс позиции (старт с начала);
+            // ручной стоп — продолжение с места остановки (последним считаем
+            // действие, на котором playback остановился)
+            manualIndex = if (resetToStart) 0 else when {
                 actionIndex > 0 -> actionIndex - 1
                 cycleCount > 0 -> sp.actions.size - 1
                 else -> 0
@@ -1807,7 +1837,7 @@ class ClickService : AccessibilityService() {
         }
         handler.removeCallbacks(tick)
         // ФИЧА (v25): отсчёт до следующего действия больше не идёт —
-        // строка прогресса переходит в простой («Действий: N»)
+        // строка прогресса переходит в простой («Клик 1/N»)
         nextActionAtMs = 0L
         // ФИЧА (v23): тикер панели больше не нужен
         stopUiTicker()
@@ -1928,7 +1958,7 @@ class ClickService : AccessibilityService() {
                 "CYCLES" -> cycleCount >= preset.cycles
                 else -> false
             }
-            if (shouldStop) { stopPlayback(); return }
+            if (shouldStop) { stopPlayback(resetToStart = true); return }
 
             if (gestureInFlight) {
                 handler.postDelayed(this, 20L)
@@ -1966,7 +1996,7 @@ class ClickService : AccessibilityService() {
                     actionIndex = 0
                     cycleCount++
                     if (preset.timingMode == "CYCLES" && cycleCount >= preset.cycles) {
-                        stopPlayback(); return
+                        stopPlayback(resetToStart = true); return
                     }
                 }
                 val a = preset.actions[actionIndex]
@@ -2092,6 +2122,7 @@ class ClickService : AccessibilityService() {
         hideMtwsMarkers()
         hidePresetList()
         updatePanelState()
+        updateBubbleIcon()  // v33: пузырь показывает красный REC и не запускается тапом
         return true
     }
 
@@ -2116,6 +2147,7 @@ class ClickService : AccessibilityService() {
         onRecordDoneRef = null
         refreshMtwsMarkers()
         updatePanelState()
+        updateBubbleIcon()  // v33: пузырь возвращается к серому play
         if (bringBackEditor) bringBackSettingsEditor()
         if (cb != null) {
             lastRecordResult = null

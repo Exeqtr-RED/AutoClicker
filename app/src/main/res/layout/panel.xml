@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Компактная ВЕРТИКАЛЬНАЯ панель (как в OP Auto Clicker):
-     шапка-ручка / имя пресета / ◀ ▶ ▶▶ (навигация MTWS) /
+     счётчик кликов/таймер / имя пресета / ◀ ▶ ▶▶ (навигация MTWS) /
      прогресс MTWS или задержка ST (размером с play) / ☰ ⊕ ✕
-     (v25: кнопка паузы удалена — её место заняла строка прогресса MTWS) -->
+     (v25: кнопка паузы удалена — её место заняла строка прогресса MTWS)
+     (v32: из шапки удалены ≡ и индикатор ● — счётчик занял освободившееся
+      место; нижние кнопки ☰ ⊕ ✕ теперь строго круглые 36×36dp; play и
+      строка задержки/прогресса понижены 44→38dp; панель в целом стала
+      ниже — пропорция ближе к квадрату) -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="156dp"
     android:layout_height="wrap_content"
@@ -10,48 +14,30 @@
     android:background="@drawable/bg_panel"
     android:paddingStart="12dp"
     android:paddingEnd="10dp"
-    android:paddingTop="8dp"
-    android:paddingBottom="10dp">
+    android:paddingTop="6dp"
+    android:paddingBottom="8dp">
 
-    <!-- Шапка: он же ручка перетаскивания -->
+    <!-- Шапка: он же ручка перетаскивания.
+         v32: ≡ и ● удалены — счётчик (вес 1) растянут на всё место
+         слева от кнопки сворачивания -->
     <LinearLayout
         android:id="@+id/dragHandle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:paddingTop="2dp"
-        android:paddingBottom="6dp">
+        android:paddingBottom="4dp">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="≡"
-            android:textSize="16sp"
-            android:textColor="@color/text_secondary" />
-
-        <!-- ФИКС (v23): серый по умолчанию (простой). Раньше стоял красный —
-             цвет читался как «идёт запись». Реальный цвет всегда задаёт
-             служба (updatePanelState): запись = красный, работа = зелёный,
-             простой = серый (v25: пауза удалена) -->
-        <TextView
-            android:id="@+id/tvStatus"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="●"
-            android:textSize="16sp"
-            android:textColor="#FF9E9E9E" />
-
+        <!-- ФИЧА: счётчик кликов + таймер сессии. v32: первое и единственное
+             поле шапки — занимает всю ширину, кроме кнопки «—» -->
         <TextView
             android:id="@+id/tvCounter"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginStart="6dp"
             android:layout_weight="1"
             android:background="@drawable/bg_chip"
-            android:paddingStart="6dp"
-            android:paddingEnd="6dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
             android:paddingTop="2dp"
             android:paddingBottom="2dp"
             android:text="0 · 00:00"
@@ -82,8 +68,8 @@
         android:gravity="center"
         android:paddingStart="6dp"
         android:paddingEnd="6dp"
-        android:paddingTop="3dp"
-        android:paddingBottom="3dp"
+        android:paddingTop="2dp"
+        android:paddingBottom="2dp"
         android:text="Пресет не выбран"
         android:textSize="11sp"
         android:textColor="#B3FFFFFF"
@@ -92,12 +78,13 @@
 
     <!-- ФИЧА (v24): Старт/Стоп + навигация по действиям MTWS.
          Для Single Target кнопки ◀/▶ скрыты (gone) — play занимает всю ширину.
-         Для MTWS: слева от play «предыдущее действие», справа — «следующее» -->
+         Для MTWS: слева от play «предыдущее действие», справа — «следующее».
+         v32: высота ряда понижена 44→38dp (панель стала ниже) -->
     <LinearLayout
         android:id="@+id/playNavRow"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
+        android:layout_marginTop="5dp"
         android:orientation="horizontal">
 
         <!-- ФИЧА (v24): выполнить ПРЕДЫДУЩЕЕ действие пресета (MTWS).
@@ -106,7 +93,7 @@
         <ImageButton
             android:id="@+id/btnPrevAction"
             android:layout_width="0dp"
-            android:layout_height="44dp"
+            android:layout_height="38dp"
             android:layout_weight="1"
             android:layout_marginEnd="6dp"
             android:minWidth="0dp"
@@ -114,7 +101,7 @@
             android:background="@drawable/btn_secondary"
             android:stateListAnimator="@null"
             android:src="@drawable/ic_prev"
-            android:padding="10dp"
+            android:padding="8dp"
             android:scaleType="fitCenter"
             android:visibility="gone"
             android:contentDescription="Предыдущее действие" />
@@ -122,14 +109,14 @@
         <ImageButton
             android:id="@+id/toggleBtn"
             android:layout_width="0dp"
-            android:layout_height="44dp"
+            android:layout_height="38dp"
             android:layout_weight="1.4"
             android:minWidth="0dp"
             android:minHeight="0dp"
-            android:background="@drawable/btn_primary"
+            android:background="@drawable/btn_play_green"
             android:stateListAnimator="@null"
             android:src="@drawable/ic_play"
-            android:padding="10dp"
+            android:padding="8dp"
             android:scaleType="fitCenter"
             android:contentDescription="Старт / Стоп" />
 
@@ -138,7 +125,7 @@
         <ImageButton
             android:id="@+id/btnNextAction"
             android:layout_width="0dp"
-            android:layout_height="44dp"
+            android:layout_height="38dp"
             android:layout_weight="1"
             android:layout_marginStart="6dp"
             android:minWidth="0dp"
@@ -146,27 +133,28 @@
             android:background="@drawable/btn_secondary"
             android:stateListAnimator="@null"
             android:src="@drawable/ic_next"
-            android:padding="10dp"
+            android:padding="8dp"
             android:scaleType="fitCenter"
             android:visibility="gone"
             android:contentDescription="Следующее действие" />
     </LinearLayout>
 
     <!-- ФИЧА (v25): строка ПРОГРЕССА MTWS — на месте бывшей кнопки паузы.
-         В playback: «Тап 2/5 · 3,4 с» — номер выполняемого действия и
-         обратный отсчёт до следующего; в простое: «Действий: N».
+         ФОРМАТ (v35): «Клик 1/15» / «Свайп 3/15» — вид действия, номер
+         выполняемого (в playback) или выбранного перемоткой (в простое)
+         действия и всего действий пресета; обратный отсчёт убран.
          Для ST-пресетов скрыта — её место занимает строка задержки.
-         Размер — как у кнопки play (44dp), ширина во всю панель -->
+         Размер — как у кнопки play (v32: 38dp), ширина во всю панель -->
     <TextView
         android:id="@+id/tvProgress"
         android:layout_width="match_parent"
-        android:layout_height="44dp"
-        android:layout_marginTop="6dp"
+        android:layout_height="38dp"
+        android:layout_marginTop="5dp"
         android:background="@drawable/bg_chip"
         android:gravity="center"
         android:paddingStart="6dp"
         android:paddingEnd="6dp"
-        android:text="Действий: —"
+        android:text="Клик —/—"
         android:textSize="12sp"
         android:textColor="#B3FFFFFF"
         android:singleLine="true"
@@ -175,12 +163,12 @@
     <!-- ФИЧА (v24/v25): строка задержки между кликами (только Single Target).
          Показывает текущее значение (с разбросом, если включён); тап открывает
          редактор с клавиатурой — прямо из плавающей панели, без приложения.
-         v25: высота 44dp — РАЗМЕР С КНОПКУ PLAY -->
+         v25: высота — РАЗМЕР С КНОПКУ PLAY; v32: 44→38dp -->
     <TextView
         android:id="@+id/tvDelayValue"
         android:layout_width="match_parent"
-        android:layout_height="44dp"
-        android:layout_marginTop="6dp"
+        android:layout_height="38dp"
+        android:layout_marginTop="5dp"
         android:background="@drawable/bg_chip"
         android:gravity="center"
         android:paddingStart="6dp"
@@ -191,52 +179,73 @@
         android:singleLine="true"
         android:visibility="gone" />
 
-    <!-- Нижний ряд: выбор пресета · прицел · закрыть -->
+    <!-- Нижний ряд: выбор пресета · прицел · закрыть.
+         ФИКС (v32): кнопки теперь СТРОГО КРУГЛЫЕ — фиксированный размер
+         36×36dp по центру равных третей ряда. Раньше ширина задавалась
+         весом (~40dp) при высоте 36dp, и oval-фон растягивался в приплюснутый
+         овал; горизонтальные отступы между кнопками не нужны — их даёт
+         само деление ряда на три равные доли -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="36dp"
-        android:layout_marginTop="6dp"
+        android:layout_marginTop="5dp"
         android:orientation="horizontal">
 
-        <Button
-            android:id="@+id/presetsBtn"
+        <FrameLayout
             android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_weight="1"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:background="@drawable/btn_icon"
-            android:stateListAnimator="@null"
-            android:text="☰"
-            android:textSize="15sp"
-            android:textColor="@color/text_primary" />
+            android:layout_height="match_parent"
+            android:layout_weight="1">
 
-        <Button
-            android:id="@+id/crosshairBtn"
-            android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_marginStart="6dp"
-            android:layout_weight="1"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:background="@drawable/btn_icon"
-            android:stateListAnimator="@null"
-            android:text="⊕"
-            android:textSize="15sp"
-            android:textColor="@color/text_primary" />
+            <Button
+                android:id="@+id/presetsBtn"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:layout_gravity="center"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:background="@drawable/btn_icon"
+                android:stateListAnimator="@null"
+                android:text="☰"
+                android:textSize="15sp"
+                android:textColor="@color/text_primary" />
+        </FrameLayout>
 
-        <Button
-            android:id="@+id/closeBtn"
+        <FrameLayout
             android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_marginStart="6dp"
-            android:layout_weight="1"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:background="@drawable/btn_icon"
-            android:stateListAnimator="@null"
-            android:text="✕"
-            android:textSize="15sp"
-            android:textColor="@color/text_secondary" />
+            android:layout_height="match_parent"
+            android:layout_weight="1">
+
+            <Button
+                android:id="@+id/crosshairBtn"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:layout_gravity="center"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:background="@drawable/btn_icon"
+                android:stateListAnimator="@null"
+                android:text="⊕"
+                android:textSize="15sp"
+                android:textColor="@color/text_primary" />
+        </FrameLayout>
+
+        <FrameLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1">
+
+            <Button
+                android:id="@+id/closeBtn"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:layout_gravity="center"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:background="@drawable/btn_icon"
+                android:stateListAnimator="@null"
+                android:text="✕"
+                android:textSize="15sp"
+                android:textColor="@color/text_secondary" />
+        </FrameLayout>
     </LinearLayout>
 </LinearLayout>

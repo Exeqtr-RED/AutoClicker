@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Свернувшаяся панель: круглый пузырь, тап — развернуть, драг — переместить.
-     ФИЧА: векторная иконка «развернуть» вместо глифа «▶» (выглядел как play) -->
+<!-- Свернувшаяся панель: круглый пузырь.
+     ФИЧА (v33): тап — СТАРТ/СТОП выбранного пресета (иконку play/стоп
+     рисует служба в updateBubbleIcon по состоянию), УДЕРЖАНИЕ — развернуть
+     панель обратно, драг — переместить.
+     Раньше (до v33) тап разворачивал панель (иконка ic_expand),
+     а удержание скрывало все оверлеи -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="48dp"
     android:layout_height="48dp"
@@ -12,6 +16,6 @@
         android:layout_height="48dp"
         android:padding="13dp"
         android:scaleType="fitCenter"
-        android:src="@drawable/ic_expand"
-        android:contentDescription="Развернуть панель" />
+        android:src="@drawable/ic_play"
+        android:contentDescription="Старт скрипта; удержание — развернуть панель" />
 </FrameLayout>

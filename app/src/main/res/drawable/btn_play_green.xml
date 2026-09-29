@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ФИЧА (v34): кнопка play — ЗЕЛЁНАЯ пилюля (семантика старта).
+     Форма и радиус как у btn_primary/btn_stop — кнопка не «прыгает»
+     при смене состояния -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#40FFFFFF">
+    <item>
+        <shape>
+            <gradient
+                android:angle="315"
+                android:startColor="@color/accent_green"
+                android:endColor="#FF00C853"
+                android:type="linear" />
+            <corners android:radius="22dp" />
+            <stroke android:width="1dp" android:color="#59FFFFFF" />
+        </shape>
+    </item>
+</ripple>

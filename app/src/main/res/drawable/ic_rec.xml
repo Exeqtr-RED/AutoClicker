@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Индикатор записи: оранжевый круг (замена текстового REC на градиентной кнопке) -->
+<!-- Индикатор записи: БЕЛЫЙ круг (ФИКС v34: был оранжевым; по цветовой
+     схеме v34 иконки в кнопках белые — цвет несёт ФОН кнопки:
+     запись = синяя пилюля btn_rec_blue) -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
     <path
-        android:fillColor="#FFFFAA00"
+        android:fillColor="#FFFFFFFF"
         android:pathData="M12,5 a7,7 0 1,0 0.001,0 Z" />
 </vector>
