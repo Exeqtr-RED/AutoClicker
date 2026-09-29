@@ -1,9 +1,12 @@
 package com.example.autoclicker
 
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.view.accessibility.AccessibilityManager
 import android.widget.Button
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -35,7 +38,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         findViewById<Button>(R.id.btnA11y).setOnClickListener {
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            openAccessibilitySettings()
         }
     }
 
@@ -66,13 +69,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isClickServiceEnabled(): Boolean {
-        val expected = "$packageName/${ClickService::class.java.name}"
-        val enabled = Settings.Secure.getString(
-            contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: return false
-        // Список включённых служб хранится как «пакет/класс:пакет/класс:…»
-        return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
+        // ФИКС (v36): ручной парсинг строки Settings.Secure.ENABLED_ACCESSIBILITY_
+        // SERVICES заменён на официальный API AccessibilityManager — не зависит
+        // от формата хранения строки в конкретной прошивке (регистр, пробелы,
+        // компонент с сокращённым именем класса) и корректен для текущего
+        // пользователя/профиля
+        val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
+            ?: return false
+        // FEEDBACK_ALL_MASK — «все службы независимо от типа обратной связи»
+        return am.getEnabledAccessibilityServiceList(
+            AccessibilityServiceInfo.FEEDBACK_ALL_MASK
+        ).any { info ->
+            val si = info.resolveInfo?.serviceInfo ?: return@any false
+            si.packageName == packageName && si.name == ClickService::class.java.name
+        }
+    }
+
+    private fun openAccessibilitySettings() {
+        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 
     private fun openSettings(mode: String) {

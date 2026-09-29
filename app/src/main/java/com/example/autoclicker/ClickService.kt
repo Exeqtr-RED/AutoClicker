@@ -13,8 +13,8 @@ import android.text.InputType
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-// ФИЧА (v25): обратный отсчёт до следующего действия MTWS (монотонные часы)
-import android.os.SystemClock
+// ФИКС (v36): импорт SystemClock и поле nextActionAtMs удалены — после v35
+// (убран обратный отсчёт) поле оставалось мёртвым: записывалось, но не читалось
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -39,6 +39,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+// ФИКС (v36): хардкод цветов заменён на палитру colors.xml (ContextCompat)
+import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.lang.ref.WeakReference
 import kotlin.random.Random
@@ -53,8 +55,8 @@ class ClickService : AccessibilityService() {
         // Для диагностики поставьте true.
         private const val LOG_DEBUG = false
 
-        // ФИКС: состояние службы (последний пресет) переживает перезапуск службы
-        private const val STATE_PREFS = "service_state"
+        // ФИКС: состояние службы (последний пресет) переживает перезапуск службы.
+        const val STATE_PREFS = "service_state"
         private const val KEY_LAST_PRESET = "last_preset"
         private const val KEY_CROSSHAIR_HIDDEN = "crosshair_hidden"
         // ФИЧА (v23): панель и пузырь запоминают позицию — переживают
@@ -92,6 +94,10 @@ class ClickService : AccessibilityService() {
         // Объявляем значение сами: система ставит этот флаг (0x10) жестам,
         // внедрённым через AccessibilityService.dispatchGesture, значение
         // стабильно начиная с Android 9.
+        // ФИКС (v36): на Android 7.x–8.x (API < 28) система НЕ ставит флаг
+        // инжектированным жестам → живой предпросмотр записи там отключён
+        // (см. scheduleLiveReplay), иначе каждый предпросмотр записывался
+        // бы как новое действие (список растёт сам)
         private const val FLAG_IS_GENERATED_GESTURE = 0x00000010
 
         // ФИКС: сколько подряд отменённых жестов считаем «жесты блокируются»
@@ -194,11 +200,16 @@ class ClickService : AccessibilityService() {
     private var bubbleIcon: ImageView? = null
 
     // ФИЧА (v25): прогресс MTWS для строки на панели — номер (1-based)
-    // последнего запущенного действия и момент (elapsedRealtime) старта
-    // следующего; 0 = отсчёт не идёт. Пауза удалена (v25) — механика
-    // paused/pauseStartMs больше не нужна
+    // последнего запущенного действия. Пауза удалена (v25), обратный отсчёт
+    // удалён (v35); ФИКС (v36): поле nextActionAtMs удалено как мёртвое —
+    // после v35 оно только записывалось, но нигде не читалось
     private var progressActionNo = 0
-    @Volatile private var nextActionAtMs = 0L
+
+    // ФИКС (v36, батарея): кэш последних текстов тикера — setText
+    // одинаковой строки не вызывается (панель обновляется «событийно»,
+    // а не 10 раз/сек)
+    private var lastCounterText: String? = null
+    private var lastProgressText: String? = null
 
     // ФИЧА: счётчик завершённых кликов за сессию
     private var clickCount = 0
@@ -239,16 +250,17 @@ class ClickService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
 
     // ФИЧА (v23/v25): тикер панели — таймер/счётчик и строка прогресса MTWS.
-    // Интервал 100 мс: обратный отсчёт до следующего действия обновляется
-    // ПЛАВНО (с десятыми долями секунды); таймер сессии показывает целые
-    // секунды — частая перерисовка на него не влияет. Тикер безопасен при
-    // свёрнутой панели: updateCounter()/updateProgress() просто выходят,
-    // если панель не показана
+    // ФИКС (v36, батарея): интервал 100 → 250 мс (после v35 текст меняется
+    // раз в секунду или при смене действия — чаще не нужно) + кэш последнего
+    // текста в updateCounter/updateProgress: setText одинаковой строки больше
+    // не дёргает TextView 10 раз/сек впустую. Экономия батареи на
+    // многочасовом playback. Тикер безопасен при свёрнутой панели:
+    // updateCounter()/updateProgress() просто выходят, если панель не показана
     private val uiTicker = object : Runnable {
         override fun run() {
             updateCounter()
             updateProgress()
-            if (playing) handler.postDelayed(this, 100L)
+            if (playing) handler.postDelayed(this, 250L)
         }
     }
 
@@ -376,6 +388,8 @@ class ClickService : AccessibilityService() {
         delayEditor = null
         screenOnOverlay = null
         tvProgress = null
+        lastCounterText = null
+        lastProgressText = null
         super.onDestroy()
     }
 
@@ -483,8 +497,6 @@ class ClickService : AccessibilityService() {
             x = px0
             y = py0
         }
-        // ФИКС (v22): поле panelParams было «только запись» — layoutParams
-        // панели и так живёт в WindowManager; локальная p используется ниже
         val v = runCatching { LayoutInflater.from(this).inflate(R.layout.panel, null) }
             .getOrElse { Log.e(TAG, "showPanel: inflate failed", it); return }
         panel = v
@@ -667,7 +679,7 @@ class ClickService : AccessibilityService() {
         }
         // ФИЧА (v25): строка ПРОГРЕССА MTWS — видна только для MTWS-пресетов
         // с действиями (занимает место бывшей паузы; для ST это место занимает
-        // строка задержки). В playback текст обновляет тикер (каждые 100 мс),
+        // строка задержки). В playback текст обновляет тикер (250 мс, v36),
         // здесь — начальный текст и его сброс при смене состояния
         val pv = tvProgress
         if (pv != null) {
@@ -684,11 +696,17 @@ class ClickService : AccessibilityService() {
     }
 
     /** ФИЧА: счётчик кликов + таймер сессии в шапке панели.
-     *  v25: пауза удалена — время течёт, пока идёт playback */
+     *  v25: пауза удалена — время течёт, пока идёт playback.
+     *  ФИКС (v36): setText только при изменении текста — тикер больше не
+     *  перерисовывает TextView впустую */
     private fun updateCounter() {
         val tv = tvCounter ?: return
         val secs: Long = if (playing) (System.currentTimeMillis() - startTimeMs) / 1000 else 0L
-        tv.text = "%d · %02d:%02d".format(clickCount, secs / 60, secs % 60)
+        val s = "%d · %02d:%02d".format(clickCount, secs / 60, secs % 60)
+        if (s != lastCounterText) {
+            lastCounterText = s
+            tv.text = s
+        }
     }
 
     /**
@@ -712,7 +730,12 @@ class ClickService : AccessibilityService() {
         val idx = if (playing) progressActionNo.coerceIn(1, size) - 1
                   else manualIndex.coerceIn(0, size - 1)
         val kind = if (preset.actions[idx].type == "tap") "Клик" else "Свайп"
-        pv.text = "$kind ${idx + 1}/$size"
+        // ФИКС (v36): setText только при изменении текста
+        val s = "$kind ${idx + 1}/$size"
+        if (s != lastProgressText) {
+            lastProgressText = s
+            pv.text = s
+        }
     }
 
     // ============================================================
@@ -843,7 +866,8 @@ class ClickService : AccessibilityService() {
             text = "Сохранить"
             textSize = 13f
             isAllCaps = false
-            setTextColor(0xFFFFFFFF.toInt())
+            // ФИКС (v36): белый из палитры colors.xml вместо хардкода
+            setTextColor(ContextCompat.getColor(context, R.color.white))
             setBackgroundResource(R.drawable.btn_primary)
             stateListAnimator = null
             setOnClickListener {
@@ -1291,15 +1315,18 @@ class ClickService : AccessibilityService() {
         when {
             recording -> {
                 iv.setImageResource(R.drawable.ic_rec)
-                iv.setColorFilter(0xFF5B8CFF.toInt())   // accent_blue
+                // ФИКС (v36): цвет из палитры colors.xml (был хардкод 0xFF5B8CFF)
+                iv.setColorFilter(ContextCompat.getColor(this, R.color.accent_blue))
             }
             playing -> {
                 iv.setImageResource(R.drawable.ic_stop)
-                iv.setColorFilter(0xFFFF4B4B.toInt())   // accent_red
+                // ФИКС (v36): цвет из палитры colors.xml (был хардкод 0xFFFF4B4B)
+                iv.setColorFilter(ContextCompat.getColor(this, R.color.accent_red))
             }
             else -> {
                 iv.setImageResource(R.drawable.ic_play)
-                iv.setColorFilter(0xFF00E676.toInt())   // accent_green
+                // ФИКС (v36): цвет из палитры colors.xml (был хардкод 0xFF00E676)
+                iv.setColorFilter(ContextCompat.getColor(this, R.color.accent_green))
             }
         }
     }
@@ -1422,7 +1449,9 @@ class ClickService : AccessibilityService() {
         // цеплять сразу за as?-приведением — парсер читает «TextView?» как
         // тип и спотыкается о «.setTextColor». Выносим приведение в переменную.
         val markerText = (v as? ViewGroup)?.getChildAt(0) as? TextView
-        markerText?.setTextColor(0xFF00CC44.toInt())
+        // ФИКС (v36): цвет из палитры colors.xml (был хардкод 0xFF00CC44 —
+        // близкий к accent_green оттенок; теперь единый зелёный палитры)
+        markerText?.setTextColor(ContextCompat.getColor(this, R.color.accent_green))
 
         clickMarkerParams = p
         clickMarker = v
@@ -1770,7 +1799,6 @@ class ClickService : AccessibilityService() {
         // ФИЧА (v25/v27): строка прогресса до первого тика покажет действие,
         // с которого стартовали (1-based); при sIdx = 0 — как раньше («Клик 1/N»)
         progressActionNo = sIdx + 1
-        nextActionAtMs = 0L
         closeDelayEditor()
 
         // ФИЧА: нумерованные точки — touchable-оверлеи, на время playback
@@ -1836,9 +1864,6 @@ class ClickService : AccessibilityService() {
             }.coerceIn(0, sp.actions.size - 1)
         }
         handler.removeCallbacks(tick)
-        // ФИЧА (v25): отсчёт до следующего действия больше не идёт —
-        // строка прогресса переходит в простой («Клик 1/N»)
-        nextActionAtMs = 0L
         // ФИЧА (v23): тикер панели больше не нужен
         stopUiTicker()
         hideClickMarker()
@@ -2029,12 +2054,9 @@ class ClickService : AccessibilityService() {
                 else
                     preset.actions[actionIndex - 1].delayMs
                 // ФИЧА (v25): строка прогресса — номер только что запущенного
-                // действия (actionIndex уже инкрементирован, т.е. 1-based) и
-                // момент старта следующего; после последнего действия цикла
-                // отсчёт идёт до повторения списка (repeatIntervalMs)
+                // действия (actionIndex уже инкрементирован, т.е. 1-based).
+                // ФИКС (v36): nextActionAtMs удалён — мёртвое поле после v35
                 progressActionNo = actionIndex
-                nextActionAtMs = SystemClock.elapsedRealtime() +
-                    nextDelay.coerceAtLeast(MIN_DELAY_MS)
                 handler.postDelayed(this, nextDelay.coerceAtLeast(MIN_DELAY_MS))
             }
         }
@@ -2318,8 +2340,18 @@ class ClickService : AccessibilityService() {
         recCountOverlayRef?.text = "Записано: ${recordedActions.size}"
     }
 
-    /** ФИЧА: живой предпросмотр — отложить воспроизведение записанного жеста */
+    /**
+     * ФИЧА: живой предпросмотр — отложить воспроизведение записанного жеста.
+     * ФИКС (v36): на Android 7.x–8.x (API 24–27) предпросмотр ОТКЛЮЧЁН.
+     * Система ставит инжектированным жестам флаг FLAG_IS_GENERATED_GESTURE
+     * (0x10) только с Android 9 — на старых версиях оверлей записи не
+     * распознаёт предпросмотр как «свой», и каждый предпросмотр записывается
+     * как НОВОЕ действие (список растёт сам). Выход ДО replayInFlight и
+     * setRecordAreaTouchable — состояние записи остаётся консистентным
+     * (оверлей остаётся touchable, обычная запись продолжает работать).
+     */
     private fun scheduleLiveReplay(a: PresetAction) {
+        if (Build.VERSION.SDK_INT < 28) return
         if (replayInFlight) return // не наслаивать предпросмотры друг на друга
         replayInFlight = true
         // Прячем окно записи от касаний: иначе инжектируемый жест попадёт

@@ -650,7 +650,8 @@ class SettingsActivity : AppCompatActivity() {
         val tvDesc = TextView(this).apply {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             text = if (a.type == "tap")
-                "${index + 1}. Тап (${a.x1}, ${a.y1})"
+                // ФИКС (v36): термин синхронизирован с панелью v35 — «Клик N/M»
+                "${index + 1}. Клик (${a.x1}, ${a.y1})"
             else
                 "${index + 1}. Свайп (${a.x1},${a.y1}) → (${a.x2},${a.y2})"
             textSize = 13f

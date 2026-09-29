@@ -98,18 +98,28 @@ object PresetStorage {
     private const val PREF = "presets_v1"
     private const val KEY = "list"
 
+    // ФИКС (v36, перф): кэш распарсенных пресетов — getAll() больше не читает
+    // и не парсит JSON при каждом вызове (панель, редактор и фильтр getByMode
+    // зовут его по несколько раз за экран; при десятках пресетов парсинг
+    // заметен). Кэш строится при первом чтении и обновляется при каждой
+    // записи (persist); объект пишет только этот — внешних изменений нет
+    @Volatile private var cache: List<Preset>? = null
+
     fun getAll(ctx: Context): List<Preset> {
+        cache?.let { return it }
         val s = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-            .getString(KEY, null) ?: return emptyList()
+            .getString(KEY, null) ?: return emptyList<Preset>().also { cache = it }
         // ФИКС: битый JSON больше не роняет приложение при каждом открытии
         // настроек — строка целиком и каждая запись парсятся с защитой,
         // повреждённые элементы просто пропускаются
-        return runCatching {
+        val parsed = runCatching {
             val arr = JSONArray(s)
             (0 until arr.length()).mapNotNull { i ->
                 runCatching { Preset.fromJson(arr.getJSONObject(i)) }.getOrNull()
             }
         }.getOrDefault(emptyList())
+        cache = parsed
+        return parsed
     }
 
     fun getByMode(ctx: Context, mode: String): List<Preset> =
@@ -133,5 +143,7 @@ object PresetStorage {
         list.forEach { arr.put(it.toJson()) }
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
             .edit().putString(KEY, arr.toString()).apply()
+        // ФИКС (v36): кэш синхронен с хранилищем сразу после записи
+        cache = list
     }
 }

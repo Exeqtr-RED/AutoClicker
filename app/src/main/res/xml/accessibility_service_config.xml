@@ -2,9 +2,17 @@
 <!-- ФИКС (перф/батарея): onAccessibilityEvent пуст — подписка на события
      (typeWindowStateChanged) убрана, чтобы система не гоняла IPC-поток
      событий при каждой смене окна. Инжекция жестов (canPerformGestures)
-     от событий НЕ зависит и продолжит работать. -->
+     от событий НЕ зависит и продолжит работать.
+     ФИКС (v36): android:isAccessibilityTool="true" — приложение заявлено
+     как инструмент специальных возможностей. Без этого атрибута Android 12+
+     показывает при включении службы стандартное предупреждение «может
+     собирать содержимое экрана»; с ним — окно доверия. Для кликера,
+     который только инжектирует жесты и НЕ читает экран
+     (canRetrieveWindowContent="false"), это честная пометка.
+     На Android ниже 10 атрибут просто игнорируется. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:notificationTimeout="500"
     android:canRetrieveWindowContent="false"
-    android:canPerformGestures="true" />
+    android:canPerformGestures="true"
+    android:isAccessibilityTool="true" />
