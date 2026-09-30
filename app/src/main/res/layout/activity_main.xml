@@ -139,6 +139,20 @@
                 android:textColor="@color/text_primary"
                 android:textAllCaps="false"
                 android:text="Включить службу (Accessibility)" />
+
+            <!-- ФИКС (v37): живая подсказка состояния службы — различает
+                 «выключена» / «включена, но не запущена» / «работает, но нет
+                 разрешения на оверлей». Цвет текста задаётся из кода
+                 (оранжевый — внимание, серый — всё в порядке) -->
+            <TextView
+                android:id="@+id/tvA11yHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:textSize="13sp"
+                android:lineSpacingExtra="2dp"
+                android:textColor="@color/accent_orange"
+                android:text="Служба выключена — нажмите кнопку выше и включите Sekira Cliker в списке служб" />
         </LinearLayout>
 
     </LinearLayout>

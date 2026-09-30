@@ -281,6 +281,13 @@ class ClickService : AccessibilityService() {
     private var cycleCount = 0
     private var startTimeMs = 0L
 
+    // ФИЧА (v38): плановый момент СЛЕДУЮЩЕГО действия (System.currentTimeMillis()
+    // + postDelayed, ставит tick при планировании) — по нему тикер панели
+    // рисует обратный отсчёт в строке прогресса. ФОРМАТ (v39): «мин:сек» —
+    // «Клик 3/15 · 01:05» (по запросу пользователя — минуты и секунды).
+    // 0 = отсчёта нет (простой/остановка)
+    @Volatile private var nextActionAtMs = 0L
+
     // ФИЧА (v24/v27): позиция перемотки по действиям MTWS (кнопки ◀/▶ панели);
     // после остановки playback продолжает с последнего выполненного действия,
     // в простое — старт playback с выбранной этой позицией
@@ -318,7 +325,14 @@ class ClickService : AccessibilityService() {
             getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
                 .getBoolean(KEY_CROSSHAIR_HIDDEN, false)
         }.getOrDefault(false)
-        ensureOverlays()
+        // ФИКС (v37): если служба подключилась, но разрешение «Поверх других
+        // окон» не выдано — плавающая панель НЕ появится, и раньше это
+        // происходило молча (ensureOverlays просто возвращал false).
+        // Теперь приложение сообщает о причине тостом
+        val overlaysShown = ensureOverlays()
+        if (!overlaysShown && !Settings.canDrawOverlays(this)) {
+            toast("Sekira Cliker: нет разрешения «Поверх других окон» — плавающая панель не появится")
+        }
     }
 
     /**
@@ -472,8 +486,12 @@ class ClickService : AccessibilityService() {
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
                 vib.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK))
-            else
+            else {
+                // Ветка только для API 24-25 (ниже Q): старый vibrate(Long)
+                // устарел, но другого способа на этих версиях нет
+                @Suppress("DEPRECATION")
                 vib.vibrate(20L)
+            }
         }
     }
 
@@ -713,10 +731,15 @@ class ClickService : AccessibilityService() {
      * ФИЧА (v25): строка прогресса MTWS на панели — на месте бывшей кнопки
      * паузы. ФОРМАТ (v35): «Клик 1/15» / «Свайп 3/15» — вид действия,
      * номер ТЕКУЩЕГО действия и всего записанных действий пресета.
-     * В playback это выполняемое сейчас действие (progressActionNo,
-     * обновляется тикером каждые 100 мс), в простое — ВЫБРАННОЕ
-     * перемоткой ◀/▶ (manualIndex; ничего не выбрано — первое действие).
-     * Обратный отсчёт до следующего действия убран (v35).
+     * В playback это выполняемое сейчас действие (progressActionNo),
+     * в простое — ВЫБРАННОЕ перемоткой ◀/▶ (manualIndex; ничего не
+     * выбрано — первое действие).
+     * ФИЧА (v38): во время playback к строке добавлен ОБРАТНЫЙ ОТСЧЁТ
+     * до следующего действия (плановый момент следующего действия ставит
+     * tick при планировании, тикер обновляет каждые 250 мс). В v35 отсчёт
+     * был убран — возвращён по просьбе. ФОРМАТ (v39): «мин:сек» —
+     * «Клик 3/15 · 01:05», тот же вид %02d:%02d, что у таймера сессии
+     * в шапке панели (запрос пользователя: «минуты и секунды»).
      * Для ST-пресетов строка скрыта целиком — её место занимает поле задержки
      */
     private fun updateProgress() {
@@ -730,8 +753,18 @@ class ClickService : AccessibilityService() {
         val idx = if (playing) progressActionNo.coerceIn(1, size) - 1
                   else manualIndex.coerceIn(0, size - 1)
         val kind = if (preset.actions[idx].type == "tap") "Клик" else "Свайп"
+        // ФИЧА (v38): обратный отсчёт до следующего действия. ФОРМАТ (v39):
+        // «мин:сек» — мм и сс считаются в целых (без дробей и Locale-ловушек),
+        // минуты и секунды всегда двузначные — тот же вид %02d:%02d, что у
+        // таймера сессии в шапке панели («Клик 3/15 · 01:05»)
+        val s = if (playing && nextActionAtMs > 0L) {
+            val secs = ((nextActionAtMs - System.currentTimeMillis())
+                .coerceAtLeast(0L) / 1000L).toInt()
+            "$kind ${idx + 1}/$size · " + "%02d:%02d".format(secs / 60, secs % 60)
+        } else {
+            "$kind ${idx + 1}/$size"
+        }
         // ФИКС (v36): setText только при изменении текста
-        val s = "$kind ${idx + 1}/$size"
         if (s != lastProgressText) {
             lastProgressText = s
             pv.text = s
@@ -746,20 +779,19 @@ class ClickService : AccessibilityService() {
     /**
      * ФИКС (v27): ПЕРЕМОТКА MTWS-пресета кнопками ◀/▶ панели — работает
      * в двух режимах.
-     * ВО ВРЕМЯ playback: ▶ немедленно выполняет следующее действие списка
-     * (оставшаяся пауза пропускается), ◀ — ПРЕДЫДУЩЕЕ (только что
-     * запущенное) действие; если ещё не выполнялось ничего — ◀ повторяет
-     * первое; после переноса цикла — возвращает к последнему.
-     * Воспроизведение НЕ останавливается: прыжок реализуется переносом
-     * ближайшего тика (removeCallbacks(tick) + post(tick)), а все проверки
-     * (летящий жест — цикл 20 мс, перенос цикла, лимит CYCLES) выполняет
-     * сам tick — ЕДИНСТВЕННЫЙ источник исполнения действий.
+     * ВО ВРЕМЯ playback (v38): ▶ немедленно выполняет следующее действие
+     * списка (оставшаяся пауза пропускается), ◀ — ШАГ НАЗАД: выполняется
+     * действие ПЕРЕД только что выполненным, затем скрипт продолжается
+     * вперёд (…4, 5, 6…). ФИКС (v38): раньше ◀ ПОВТОРЯЛА только что
+     * выполненное действие — счётчик в строке прогресса не менялся и клик
+     * шёл в ту же точку, из-за чего перемотка выглядела неработающей,
+     * а повторные нажатия не уходили глубже. За первым действием цикла —
+     * последнее действие предыдущего (если цикл уже шёл).
      * ФИКС (v34): В ПРОСТОЕ перемотка больше НЕ ЗАПУСКАЕТ скрипт — только
      * выбирает позицию старта (manualIndex): ▶ — следующее действие,
      * ◀ — предыдущее (на первом — остаётся, после последнего — цикл к
-     * первому). Выбранная позиция видна в строке прогресса («старт: N»).
-     * ЗАПУСК — только с кнопки play (панель/пузырь), причём play стартует
-     * С ВЫБРАННОЙ ПОЗИЦИИ — startPlayback(it, manualIndex).
+     * первому). ЗАПУСК — только с кнопки play (панель/пузырь), причём play
+     * стартует С ВЫБРАННОЙ ПОЗИЦИИ — startPlayback(it, manualIndex).
      * Выбранная позиция видна в строке прогресса («Клик N/M», v35).
      * Во время ЗАПИСИ перемотка запрещена.
      */
@@ -772,19 +804,25 @@ class ClickService : AccessibilityService() {
             val cp = currentPreset ?: return
             if (cp.actions.isEmpty()) return
             if (delta < 0) {
-                // ◀: повторить предыдущее (только что запущенное) действие;
-                // ничего ещё не выполнялось — повторить первое;
-                // после переноса цикла — вернуться к последнему
-                val t = if (actionIndex > 0) actionIndex - 1
-                        else if (cycleCount > 0) size - 1
-                        else 0
+                // ФИКС (v38): ◀ — ШАГ НАЗАД, а не повтор. actionIndex указывает
+                // на СЛЕДУЮЩЕЕ действие, поэтому только что выполненное —
+                // actionIndex - 1, а цель — ЕЩЁ НА ОДНО раньше (actionIndex - 2):
+                // счётчик в строке прогресса реально откатывается назад
+                val lastExec = actionIndex - 1
+                val t = when {
+                    lastExec > 0 -> lastExec - 1
+                    // за первым действием цикла — последнее предыдущего
+                    lastExec == 0 -> if (cycleCount > 0) size - 1 else 0
+                    // ещё ничего не выполнялось — повторить первое
+                    else -> 0
+                }
                 actionIndex = t.coerceIn(0, size - 1)
-                toast("Повтор действия: ${actionIndex + 1} из $size")
+                toast("Назад: действие ${actionIndex + 1} из $size")
             } else {
-                // ▶: следующим выполнится действие actionIndex; после
-                // последнего списка tick сам перенесёт цикл к первому
+                // ▶: немедленно выполняется следующее действие (actionIndex);
+                // после последнего списка tick сам перенесёт цикл к первому
                 val n = if (actionIndex >= size) 1 else actionIndex + 1
-                toast("Следующее действие: $n из $size")
+                toast("Вперёд: действие $n из $size")
             }
             // Прыжок = перенос ближайшего тика: оставшаяся пауза до следующего
             // действия пропускается; летящий жест tick дождётся (цикл 20 мс)
@@ -911,6 +949,11 @@ class ClickService : AccessibilityService() {
             runCatching {
                 val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
                     as InputMethodManager
+                // SHOW_IMPLICIT помечен устаревшим с API 35 (флаги soft-input
+                // выводятся из эксплуатации), но это штатный способ показать
+                // клавиатуру у оверлей-окна; на новых версиях флаг просто
+                // игнорируется — поведение идентично
+                @Suppress("DEPRECATION")
                 imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
             }
         }
@@ -1783,6 +1826,7 @@ class ClickService : AccessibilityService() {
         actionIndex = sIdx
         cycleCount = 0
         startTimeMs = System.currentTimeMillis()
+        nextActionAtMs = 0L
         // ФИКС (v29): «промывка» диспетчера — застрявший в очереди прошивки
         // штрих прошлой сессии отменяется новым dispatchGesture
         cancelStaleGesture()
@@ -1835,6 +1879,7 @@ class ClickService : AccessibilityService() {
     fun stopPlayback(resetToStart: Boolean = false) {
         if (!playing) return
         playing = false
+        nextActionAtMs = 0L
         // ФИЧА (v31): экран больше не удерживается включённым
         hideScreenOnOverlay()
         // ФИКС (v29): «призрачный клик» после остановки. dispatchGesture
@@ -2054,9 +2099,12 @@ class ClickService : AccessibilityService() {
                 else
                     preset.actions[actionIndex - 1].delayMs
                 // ФИЧА (v25): строка прогресса — номер только что запущенного
-                // действия (actionIndex уже инкрементирован, т.е. 1-based).
-                // ФИКС (v36): nextActionAtMs удалён — мёртвое поле после v35
+                // действия (actionIndex уже инкрементирован, т.е. 1-based)
                 progressActionNo = actionIndex
+                // ФИЧА (v38): запоминаем плановый момент следующего действия —
+                // тикер рисует по нему обратный отсчёт в строке прогресса
+                nextActionAtMs = System.currentTimeMillis() +
+                    nextDelay.coerceAtLeast(MIN_DELAY_MS)
                 handler.postDelayed(this, nextDelay.coerceAtLeast(MIN_DELAY_MS))
             }
         }
