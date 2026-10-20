@@ -281,20 +281,16 @@ class ClickService : AccessibilityService() {
     private var cycleCount = 0
     private var startTimeMs = 0L
 
-    // ФИЧА (v38): плановый момент СЛЕДУЮЩЕГО действия (System.currentTimeMillis()
-    // + postDelayed, ставит tick при планировании) — по нему тикер панели
-    // рисует обратный отсчёт в строке прогресса. ФОРМАТ (v39): «мин:сек» —
-    // «Клик 3/15 · 01:05» (по запросу пользователя — минуты и секунды).
-    // 0 = отсчёта нет (простой/остановка)
-    @Volatile private var nextActionAtMs = 0L
-
     // ФИЧА (v24/v27): позиция перемотки по действиям MTWS (кнопки ◀/▶ панели);
     // после остановки playback продолжает с последнего выполненного действия,
     // в простое — старт playback с выбранной этой позицией
     private var manualIndex = 0
 
     @Volatile private var gestureInFlight = false
-    private var consecutiveCancels = 0
+    // ФИКС (v37, гонка): onCancelled/onCompleted приходят на binder-потоке,
+    // а сбрасывается поле в startPlayback (главный поток) — без @Volatile
+    // главный поток мог бы не увидеть инкремент от binder-потока
+    @Volatile private var consecutiveCancels = 0
 
     // Recording
     private var recording = false
@@ -325,14 +321,7 @@ class ClickService : AccessibilityService() {
             getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
                 .getBoolean(KEY_CROSSHAIR_HIDDEN, false)
         }.getOrDefault(false)
-        // ФИКС (v37): если служба подключилась, но разрешение «Поверх других
-        // окон» не выдано — плавающая панель НЕ появится, и раньше это
-        // происходило молча (ensureOverlays просто возвращал false).
-        // Теперь приложение сообщает о причине тостом
-        val overlaysShown = ensureOverlays()
-        if (!overlaysShown && !Settings.canDrawOverlays(this)) {
-            toast("Sekira Cliker: нет разрешения «Поверх других окон» — плавающая панель не появится")
-        }
+        ensureOverlays()
     }
 
     /**
@@ -486,12 +475,8 @@ class ClickService : AccessibilityService() {
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
                 vib.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK))
-            else {
-                // Ветка только для API 24-25 (ниже Q): старый vibrate(Long)
-                // устарел, но другого способа на этих версиях нет
-                @Suppress("DEPRECATION")
+            else
                 vib.vibrate(20L)
-            }
         }
     }
 
@@ -731,15 +716,10 @@ class ClickService : AccessibilityService() {
      * ФИЧА (v25): строка прогресса MTWS на панели — на месте бывшей кнопки
      * паузы. ФОРМАТ (v35): «Клик 1/15» / «Свайп 3/15» — вид действия,
      * номер ТЕКУЩЕГО действия и всего записанных действий пресета.
-     * В playback это выполняемое сейчас действие (progressActionNo),
-     * в простое — ВЫБРАННОЕ перемоткой ◀/▶ (manualIndex; ничего не
-     * выбрано — первое действие).
-     * ФИЧА (v38): во время playback к строке добавлен ОБРАТНЫЙ ОТСЧЁТ
-     * до следующего действия (плановый момент следующего действия ставит
-     * tick при планировании, тикер обновляет каждые 250 мс). В v35 отсчёт
-     * был убран — возвращён по просьбе. ФОРМАТ (v39): «мин:сек» —
-     * «Клик 3/15 · 01:05», тот же вид %02d:%02d, что у таймера сессии
-     * в шапке панели (запрос пользователя: «минуты и секунды»).
+     * В playback это выполняемое сейчас действие (progressActionNo,
+     * обновляется тикером каждые 100 мс), в простое — ВЫБРАННОЕ
+     * перемоткой ◀/▶ (manualIndex; ничего не выбрано — первое действие).
+     * Обратный отсчёт до следующего действия убран (v35).
      * Для ST-пресетов строка скрыта целиком — её место занимает поле задержки
      */
     private fun updateProgress() {
@@ -753,18 +733,8 @@ class ClickService : AccessibilityService() {
         val idx = if (playing) progressActionNo.coerceIn(1, size) - 1
                   else manualIndex.coerceIn(0, size - 1)
         val kind = if (preset.actions[idx].type == "tap") "Клик" else "Свайп"
-        // ФИЧА (v38): обратный отсчёт до следующего действия. ФОРМАТ (v39):
-        // «мин:сек» — мм и сс считаются в целых (без дробей и Locale-ловушек),
-        // минуты и секунды всегда двузначные — тот же вид %02d:%02d, что у
-        // таймера сессии в шапке панели («Клик 3/15 · 01:05»)
-        val s = if (playing && nextActionAtMs > 0L) {
-            val secs = ((nextActionAtMs - System.currentTimeMillis())
-                .coerceAtLeast(0L) / 1000L).toInt()
-            "$kind ${idx + 1}/$size · " + "%02d:%02d".format(secs / 60, secs % 60)
-        } else {
-            "$kind ${idx + 1}/$size"
-        }
         // ФИКС (v36): setText только при изменении текста
+        val s = "$kind ${idx + 1}/$size"
         if (s != lastProgressText) {
             lastProgressText = s
             pv.text = s
@@ -779,19 +749,20 @@ class ClickService : AccessibilityService() {
     /**
      * ФИКС (v27): ПЕРЕМОТКА MTWS-пресета кнопками ◀/▶ панели — работает
      * в двух режимах.
-     * ВО ВРЕМЯ playback (v38): ▶ немедленно выполняет следующее действие
-     * списка (оставшаяся пауза пропускается), ◀ — ШАГ НАЗАД: выполняется
-     * действие ПЕРЕД только что выполненным, затем скрипт продолжается
-     * вперёд (…4, 5, 6…). ФИКС (v38): раньше ◀ ПОВТОРЯЛА только что
-     * выполненное действие — счётчик в строке прогресса не менялся и клик
-     * шёл в ту же точку, из-за чего перемотка выглядела неработающей,
-     * а повторные нажатия не уходили глубже. За первым действием цикла —
-     * последнее действие предыдущего (если цикл уже шёл).
+     * ВО ВРЕМЯ playback: ▶ немедленно выполняет следующее действие списка
+     * (оставшаяся пауза пропускается), ◀ — ПРЕДЫДУЩЕЕ (только что
+     * запущенное) действие; если ещё не выполнялось ничего — ◀ повторяет
+     * первое; после переноса цикла — возвращает к последнему.
+     * Воспроизведение НЕ останавливается: прыжок реализуется переносом
+     * ближайшего тика (removeCallbacks(tick) + post(tick)), а все проверки
+     * (летящий жест — цикл 20 мс, перенос цикла, лимит CYCLES) выполняет
+     * сам tick — ЕДИНСТВЕННЫЙ источник исполнения действий.
      * ФИКС (v34): В ПРОСТОЕ перемотка больше НЕ ЗАПУСКАЕТ скрипт — только
      * выбирает позицию старта (manualIndex): ▶ — следующее действие,
      * ◀ — предыдущее (на первом — остаётся, после последнего — цикл к
-     * первому). ЗАПУСК — только с кнопки play (панель/пузырь), причём play
-     * стартует С ВЫБРАННОЙ ПОЗИЦИИ — startPlayback(it, manualIndex).
+     * первому). Выбранная позиция видна в строке прогресса («старт: N»).
+     * ЗАПУСК — только с кнопки play (панель/пузырь), причём play стартует
+     * С ВЫБРАННОЙ ПОЗИЦИИ — startPlayback(it, manualIndex).
      * Выбранная позиция видна в строке прогресса («Клик N/M», v35).
      * Во время ЗАПИСИ перемотка запрещена.
      */
@@ -804,25 +775,19 @@ class ClickService : AccessibilityService() {
             val cp = currentPreset ?: return
             if (cp.actions.isEmpty()) return
             if (delta < 0) {
-                // ФИКС (v38): ◀ — ШАГ НАЗАД, а не повтор. actionIndex указывает
-                // на СЛЕДУЮЩЕЕ действие, поэтому только что выполненное —
-                // actionIndex - 1, а цель — ЕЩЁ НА ОДНО раньше (actionIndex - 2):
-                // счётчик в строке прогресса реально откатывается назад
-                val lastExec = actionIndex - 1
-                val t = when {
-                    lastExec > 0 -> lastExec - 1
-                    // за первым действием цикла — последнее предыдущего
-                    lastExec == 0 -> if (cycleCount > 0) size - 1 else 0
-                    // ещё ничего не выполнялось — повторить первое
-                    else -> 0
-                }
+                // ◀: повторить предыдущее (только что запущенное) действие;
+                // ничего ещё не выполнялось — повторить первое;
+                // после переноса цикла — вернуться к последнему
+                val t = if (actionIndex > 0) actionIndex - 1
+                        else if (cycleCount > 0) size - 1
+                        else 0
                 actionIndex = t.coerceIn(0, size - 1)
-                toast("Назад: действие ${actionIndex + 1} из $size")
+                toast("Повтор действия: ${actionIndex + 1} из $size")
             } else {
-                // ▶: немедленно выполняется следующее действие (actionIndex);
-                // после последнего списка tick сам перенесёт цикл к первому
+                // ▶: следующим выполнится действие actionIndex; после
+                // последнего списка tick сам перенесёт цикл к первому
                 val n = if (actionIndex >= size) 1 else actionIndex + 1
-                toast("Вперёд: действие $n из $size")
+                toast("Следующее действие: $n из $size")
             }
             // Прыжок = перенос ближайшего тика: оставшаяся пауза до следующего
             // действия пропускается; летящий жест tick дождётся (цикл 20 мс)
@@ -949,11 +914,6 @@ class ClickService : AccessibilityService() {
             runCatching {
                 val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
                     as InputMethodManager
-                // SHOW_IMPLICIT помечен устаревшим с API 35 (флаги soft-input
-                // выводятся из эксплуатации), но это штатный способ показать
-                // клавиатуру у оверлей-окна; на новых версиях флаг просто
-                // игнорируется — поведение идентично
-                @Suppress("DEPRECATION")
                 imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
             }
         }
@@ -1052,18 +1012,48 @@ class ClickService : AccessibilityService() {
         runCatching { wm.updateViewLayout(cv, cp) }
     }
 
-    /** ФИЧА: перетаскивание крестика двигает точку тапа ST-пресета (и сохраняет её) */
-    private fun saveCrosshairCenterToPreset() {
+    /**
+     * ФИЧА: перетаскивание крестика двигает точку тапа ST-пресета.
+     *
+     * ФИКС (v37, баг 1.9): раньше метод звал ТОЛЬКО persistLastPreset —
+     * обновлял «последний пресет» службы (state-pref), но НЕ звал
+     * PresetStorage.save. В итоге правки крестика с плавающей панели
+     * переживали рестарт службы, но НЕ переживали переоткрытие окна
+     * настроек и выбор пресета из списка (тот читает из PresetStorage,
+     * а там — старая точка). Теперь коммитим в постоянное хранилище.
+     *
+     * Разделено на два режима вызова, чтобы не гонять JSON-сериализатор
+     * и SharedPreferences на каждом MOVE (а MOVE при драге идёт
+     * десятками в секунду):
+     *  - persistToStorage = false (по умолчанию): только in-memory +
+     *    state-pref (apply-асинхронно, дёшево). Зовём из ACTION_MOVE.
+     *  - persistToStorage = true: ещё и PresetStorage.save. Зовём из
+     *    ACTION_UP — один JSON-сериализатор + SharedPreferences на драг.
+     *
+     * Если позиция не изменилась — early-return, но при persistToStorage
+     * = true всё равно коммитим (вызов мог прийти на UP без предшествующего
+     * MOVE, а в lastPreset могли быть несохранённые правки из другого места).
+     */
+    private fun saveCrosshairCenterToPreset(persistToStorage: Boolean = false) {
         val preset = lastPreset ?: return
         if (preset.mode != "ST" || preset.actions.isEmpty()) return
         val nx = crosshairCenterX.toInt()
         val ny = crosshairCenterY.toInt()
         val old = preset.actions[0]
-        if (old.x1 == nx && old.y1 == ny) return
-        lastPreset = preset.copy(actions = preset.actions.mapIndexed { i, act ->
-            if (i == 0) act.copy(x1 = nx, y1 = ny) else act
-        })
-        persistLastPreset(lastPreset!!)
+        val changed = old.x1 != nx || old.y1 != ny
+        if (changed) {
+            lastPreset = preset.copy(actions = preset.actions.mapIndexed { i, act ->
+                if (i == 0) act.copy(x1 = nx, y1 = ny) else act
+            })
+            persistLastPreset(lastPreset!!)
+        }
+        // ФИКС (v37): фикс бага 1.9 — правки крестика не теряются при
+        // переоткрытии редактора и рестарте службы. Коммит в постоянное
+        // хранилище — только при отпускании пальца (persistToStorage = true).
+        // Идемпотентен: save перезаписывает пресет с тем же (name, mode).
+        if (persistToStorage) {
+            PresetStorage.save(this, lastPreset!!)
+        }
     }
 
     // ============================================================
@@ -1422,7 +1412,18 @@ class ClickService : AccessibilityService() {
                         p.y = sy + (e.rawY - ty).toInt()
                         runCatching { wm.updateViewLayout(view, p) }
                         updateCrosshairCenter(p, view)
-                        saveCrosshairCenterToPreset()
+                        // ФИКС (v37): только in-memory + state-pref на каждом
+                        // MOVE (дёшево). Постоянное хранилище PresetStorage.save
+                        // — на ACTION_UP, иначе JSON-сериализация и
+                        // SharedPreferences-запись на десятках событий в секунду
+                        saveCrosshairCenterToPreset(persistToStorage = false)
+                        return true
+                    }
+                    // ФИКС (v37, баг 1.9): ACTION_UP отсутствовал — правки
+                    // крестика не коммитились в постоянное хранилище. Теперь
+                    // при отпускании пальца зовём PresetStorage.save.
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        saveCrosshairCenterToPreset(persistToStorage = true)
                         return true
                     }
                 }
@@ -1658,6 +1659,11 @@ class ClickService : AccessibilityService() {
         lastPreset = preset.copy(actions = preset.actions.filterIndexed { i, _ -> i != marker.index })
         currentPreset = lastPreset
         persistLastPreset(lastPreset!!)
+        // ФИКС (v37, баг 1.9): раньше правка не коммитилась в постоянное
+        // хранилище пресетов — переживала рестарт службы (state-pref), но
+        // терялась при переоткрытии редактора (тот читает из PresetStorage).
+        // Долгий тап — одноразовое событие, без нагрузки на драг/такт.
+        PresetStorage.save(this, lastPreset!!)
         // ФИЧА (v24): позиция ручной навигации прижимается к новому размеру
         // списка — после удаления точки индекс может стать недействительным
         if (manualIndex >= lastPreset!!.actions.size) {
@@ -1684,6 +1690,12 @@ class ClickService : AccessibilityService() {
         })
         currentPreset = lastPreset
         persistLastPreset(lastPreset!!)
+        // ФИКС (v37, баг 1.9): раньше правка не коммитилась в постоянное
+        // хранилище — переживала рестарт службы (state-pref), но терялась
+        // при переоткрытии редактора (читает из PresetStorage). Зовётся
+        // на ACTION_UP — одноразовое событие, дёргать JSON-сериализатор
+        // и SharedPreferences можно.
+        PresetStorage.save(this, lastPreset!!)
     }
 
     // ============================================================
@@ -1826,7 +1838,6 @@ class ClickService : AccessibilityService() {
         actionIndex = sIdx
         cycleCount = 0
         startTimeMs = System.currentTimeMillis()
-        nextActionAtMs = 0L
         // ФИКС (v29): «промывка» диспетчера — застрявший в очереди прошивки
         // штрих прошлой сессии отменяется новым dispatchGesture
         cancelStaleGesture()
@@ -1879,7 +1890,6 @@ class ClickService : AccessibilityService() {
     fun stopPlayback(resetToStart: Boolean = false) {
         if (!playing) return
         playing = false
-        nextActionAtMs = 0L
         // ФИЧА (v31): экран больше не удерживается включённым
         hideScreenOnOverlay()
         // ФИКС (v29): «призрачный клик» после остановки. dispatchGesture
@@ -1994,17 +2004,31 @@ class ClickService : AccessibilityService() {
 
     private val gestureCallback = object : GestureResultCallback() {
         override fun onCompleted(g: GestureDescription?) {
+            // ФИКС (v37, краш CalledFromWrongThreadException): колбэк
+            // приходит на binder-потоке, а не на главном. Раньше здесь
+            // звались clickCount++ и updateCounter(), которая пишет в
+            // tvCounter.text — это нелегально с не-UI потока и роняло
+            // приложение на части прошивок (особенно при быстрых тапах,
+            // когда onCompleted приходил раньше, чем UI успевал уйти).
+            // Флаги @Volatile обновляем синхронно — они нужны для
+            // разблокировки следующего tick'а (poll 20 мс)
             gestureInFlight = false
             consecutiveCancels = 0
-            // ФИЧА: считаем только реально завершённые жесты.
-            // (v27: отдельных «ручных шагов мимо playback» больше нет —
-            // перемотка ◀/▶ исполняет действия через tick, поэтому КАЖДЫЙ
-            // завершённый жест — клик сценария и попадает в счётчик)
-            clickCount++
-            updateCounter()
+            // UI-мутации — через handler.post, всегда на главном
+            handler.post {
+                // ФИЧА: считаем только реально завершённые жесты.
+                // (v27: отдельных «ручных шагов мимо playback» больше нет —
+                // перемотка ◀/▶ исполняет действия через tick, поэтому КАЖДЫЙ
+                // завершённый жест — клик сценария и попадает в счётчик)
+                clickCount++
+                updateCounter()
+            }
         }
 
         override fun onCancelled(g: GestureDescription?) {
+            // ФИКС (v37, краш): см. onCompleted — UI-мутации через handler.post.
+            // Флаги обновляем синхронно (gestureInFlight — иначе tick уйдёт
+            // в busy-poll навсегда, ожидая несуществующий «летающий» жест)
             gestureInFlight = false
             // ФИКС: серия подряд отменённых жестов обычно означает, что жесты
             // блокирует оверлей либо координаты вне экрана. Раньше playback
@@ -2012,8 +2036,16 @@ class ClickService : AccessibilityService() {
             consecutiveCancels++
             if (playing && consecutiveCancels >= MAX_CONSECUTIVE_CANCELS) {
                 Log.w(TAG, "gestures cancelled $consecutiveCancels times in a row — stopping")
-                stopPlayback()
-                toast("Жесты блокируются — воспроизведение остановлено")
+                // ФИКС (v37, краш): stopPlayback трогает wm.removeView,
+                // updatePanelState, refreshMtwsMarkers, toast — всё это
+                // незаконно с binder-потока. Уходим на главный.
+                // Несколько подряд onCancelled могут запостить несколько
+                // stopPlayback — это безопасно: первый поставит playing=false,
+                // остальные выйдут по раннему return в stopPlayback.
+                handler.post {
+                    stopPlayback()
+                    toast("Жесты блокируются — воспроизведение остановлено")
+                }
             }
         }
     }
@@ -2099,12 +2131,9 @@ class ClickService : AccessibilityService() {
                 else
                     preset.actions[actionIndex - 1].delayMs
                 // ФИЧА (v25): строка прогресса — номер только что запущенного
-                // действия (actionIndex уже инкрементирован, т.е. 1-based)
+                // действия (actionIndex уже инкрементирован, т.е. 1-based).
+                // ФИКС (v36): nextActionAtMs удалён — мёртвое поле после v35
                 progressActionNo = actionIndex
-                // ФИЧА (v38): запоминаем плановый момент следующего действия —
-                // тикер рисует по нему обратный отсчёт в строке прогресса
-                nextActionAtMs = System.currentTimeMillis() +
-                    nextDelay.coerceAtLeast(MIN_DELAY_MS)
                 handler.postDelayed(this, nextDelay.coerceAtLeast(MIN_DELAY_MS))
             }
         }
@@ -2238,21 +2267,24 @@ class ClickService : AccessibilityService() {
     private fun bringBackSettingsEditor(mode: String = "MTWS") {
         val tid = editorTaskId
         editorTaskId = -1
-        // Подъём задачи целиком. Нюанс: moveTaskToFront НЕ БРОСАЕТ
-        // исключение, если задачи уже нет — раньше метод просто выходил,
-        // и окно не возвращалось НИКОГДА. Теперь после moveTaskToFront
-        // ВСЕГДА дублируем запуск с REORDER_TO_FRONT: живая активность
-        // получит onNewIntent (дубликата не будет), уничтоженная —
-        // создастся заново с черновиком
-        if (tid != -1 && runCatching { bringTaskToFront(tid) }
+        // ФИКС (v37): moveTaskToFront НЕ БРОСАЕТ исключение, если задачи
+        // уже нет, и НЕ возвращает результата — метод всегда выходит
+        // «успешно», даже когда по факту ничего не сделал. Раньше
+        // bringTaskToFront возвращал true в любом случае, и код «после
+        // moveTaskToFront ВСЕГДА дублируем запуск с REORDER_TO_FRONT» —
+        // не дублировал: ранний return в if-ветке пропускал второй
+        // launchEditorPlain. На части прошивок (MIUI/HyperOS) задача к
+        // этому моменту уже мертва, moveTaskToMany молчит, и редактор
+        // не поднимался ВООБЩЕ. Теперь оба шага выполняются всегда:
+        // moveTaskToFront (если есть tid) + launchEditorPlain. Живая
+        // активность получит onNewIntent (дубликата не будет, режим
+        // сохранится — см. onNewIntent), уничтоженная — создастся заново.
+        if (tid != -1) {
+            runCatching { bringTaskToFront(tid) }
                 .onFailure { Log.e(TAG, "bringTaskToFront($tid) failed", it) }
-                .getOrDefault(false)) {
-            runCatching { launchEditorPlain(mode) }
-                .onFailure { Log.e(TAG, "bringBackSettingsEditor: plain launch failed", it) }
-            return
         }
         runCatching { launchEditorPlain(mode) }
-            .onFailure { Log.e(TAG, "bringBackSettingsEditor: failed", it) }
+            .onFailure { Log.e(TAG, "bringBackSettingsEditor: launch failed", it) }
     }
 
     /** ФИКС (v19): интент редактора — общий для обоих путей запуска */
@@ -2270,13 +2302,15 @@ class ClickService : AccessibilityService() {
     }
 
     /** ФИКС (v18): поднять задачу редактора целиком — из недавних задача
-     *  возвращается в том состоянии, в котором была. Ошибка (задачи нет /
-     *  отказ ОС) вернёт false — вызывающий уйдёт в fallback через
-     *  startActivity */
-    private fun bringTaskToFront(taskId: Int): Boolean {
+     *  возвращается в том состоянии, в котором была.
+     *  ФИКС (v37): убран вводящий в заблуждение Boolean-возврат —
+     *  moveTaskToFront не сообщает об успехе/неудаче в принципе
+     *  (молча делает ничего, если задачи нет или ОС режет), поэтому
+     *  сигнализировать успех «истиной» нельзя. Вызывающий код больше
+     *  не опирается на результат. */
+    private fun bringTaskToFront(taskId: Int) {
         val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         am.moveTaskToFront(taskId, 0)
-        return true
     }
 
     private fun showRecordOverlay(): Boolean {
@@ -2414,13 +2448,27 @@ class ClickService : AccessibilityService() {
         if (last == null) { restoreRecordArea(); return }
         val g = runCatching { buildReplayGesture(last) }
             .getOrElse { Log.e(TAG, "buildReplayGesture failed", it); restoreRecordArea(); return }
+        // ФИКС (v37, краш): колбэк приходит на binder-потоке, а
+        // restoreRecordArea() зовёт wm.updateViewLayout через
+        // setRecordAreaTouchable — с binder-потока это незаконно.
+        // Уходим на главный через handler.post.
         val cb = object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) { restoreRecordArea() }
-            override fun onCancelled(gestureDescription: GestureDescription?) { restoreRecordArea() }
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                handler.post { restoreRecordArea() }
+            }
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                handler.post { restoreRecordArea() }
+            }
         }
         val ok = runCatching { dispatchGesture(g, cb, null) }
             .getOrElse { Log.e(TAG, "dispatchGesture(replay) error", it); false }
-        if (!ok) restoreRecordArea()
+        if (!ok) {
+            // Сюда падаем, если dispatchGesture сразу вернул false —
+            // колбэка не будет, restoreRecordArea зовём сами. Текущий
+            // поток — главный (dispatchLiveReplay бежит через replayRunnable
+            // на handler), post не нужен.
+            restoreRecordArea()
+        }
     }
 
     private fun restoreRecordArea() {
