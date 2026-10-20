@@ -103,6 +103,13 @@ class ClickService : AccessibilityService() {
         // ФИКС: сколько подряд отменённых жестов считаем «жесты блокируются»
         private const val MAX_CONSECUTIVE_CANCELS = 5
 
+        // ФИКС (v38, OOM): потолок записанных действий. Без него многочасовая
+        // запись (пользователь ушёл, забыв остановить) росла без предела и
+        // переполняла память. 5000 — достаточно для большинства реальных
+        // сценариев (CLICK-игры, фарм, прокачка); на типичном пресете
+        // 5000 действий × ~50 байт/запись ≈ 250 КБ — незаметно.
+        private const val MAX_RECORDED_ACTIONS = 5000
+
         // ФИКС (v23): порог «тап или свайп» при записи — в DP, а не в сырых
         // пикселях. Было 40 px: на экранах с плотностью 3x это всего ~13dp
         // (лёгкий драг записывался тапом), на mdpi — целых 40dp (короткий
@@ -139,6 +146,14 @@ class ClickService : AccessibilityService() {
     }
 
     private lateinit var wm: WindowManager
+
+    // ФИКС (v38, перф): кеш Vibrator. haptic() зовётся на каждое нажатие
+    // кнопки панели/пузыря, на каждый drag-шаг и на долгий тап маркера.
+    // getSystemService + cast на каждое нажатие — не бесплатно. Кешируем
+    // один раз в onServiceConnected. null — если Vibrator недоступен
+    // (странная прошивка) или getSystemService вернул null; haptic
+    // тогда тихо выйдет
+    private var vibrator: Vibrator? = null
 
     // Панель
     private var panel: View? = null
@@ -215,7 +230,11 @@ class ClickService : AccessibilityService() {
     private var clickCount = 0
 
     // ФИЧА: нумерованные точки MTWS (драг — переместить, долгий тап — удалить)
-    private class MtwsMarker(val view: View, val index: Int)
+    // ФИКС (v38, перф): index — var (при переупорядочивании/добавлении
+    // перенумеруется в in-place refresh без re-inflate), params хранится
+    // здесь же — refreshMtwsMarkers обновляет позицию маркера через
+    // тот же объект LayoutParams, что и touch-listener, без приведения типов
+    private class MtwsMarker(val view: View, var index: Int, val params: WindowManager.LayoutParams)
     private val mtwsMarkers = mutableListOf<MtwsMarker>()
 
     // Оверлеи
@@ -256,11 +275,19 @@ class ClickService : AccessibilityService() {
     // не дёргает TextView 10 раз/сек впустую. Экономия батареи на
     // многочасовом playback. Тикер безопасен при свёрнутой панели:
     // updateCounter()/updateProgress() просто выходят, если панель не показана
+    // ФИКС (v38, перф, батарея): интервал 250 мс → 1000 мс. Тикер
+    // обновляет секундный таймер (естественная 1-секундная гранулярность)
+    // и раньше обновлял прогресс MTWS — теперь прогресс зовётся напрямую
+    // из tick после progressActionNo = actionIndex (мгновенно при смене
+    // действия). updateCounter/updateProgress с кэшем lastCounterText/
+    // lastProgressText пропускают одинаковые setText — но сами пробуждения
+    // хендлера 4 раза в секунду на многочасовом playback всё равно
+    // будили CPU. 1 раз в секунду — достаточно для таймера.
     private val uiTicker = object : Runnable {
         override fun run() {
             updateCounter()
-            updateProgress()
-            if (playing) handler.postDelayed(this, 250L)
+            // updateProgress убран — зовётся из tick при смене действия
+            if (playing) handler.postDelayed(this, 1000L)
         }
     }
 
@@ -292,9 +319,24 @@ class ClickService : AccessibilityService() {
     // главный поток мог бы не увидеть инкремент от binder-потока
     @Volatile private var consecutiveCancels = 0
 
+    // ФИКС (v38, перф): признак «tick сработал, но gestureInFlight=true —
+    // ждём завершения жеста». Раньше tick в этом случае звал
+    // handler.postDelayed(this, 20L) — busy-poll каждые 20 мс на длине
+    // свайпа (до 5 секунд при swipeDurationMs=5000). Теперь tick ставит
+    // флаг и возвращается, а gestureCallback.onCompleted/onCancelled
+    // при завершении жеста постит tick снова. Доступ только из главного
+    // потока (tick — главный, gestureCallback.post — главный), но
+    // @Volatile для ясности и на случай будущих изменений
+    @Volatile private var pendingTick = false
+
     // Recording
     private var recording = false
     private var recordedActions = mutableListOf<PresetAction>()
+    // ФИКС (v38, OOM): признак «достигнут потолок MAX_RECORDED_ACTIONS —
+    // тост уже показан, новые действия не добавляем». Сбрасывается в
+    // stopRecordingInternal. Без флага тост срабатывал бы на КАЖДЫЙ тап
+    // после превышения — бесило бы пользователя
+    private var recordingFullNotified = false
     // ФИКС (утечка памяти): как и pickOnDoneRef — колбэк хранится через
     // WeakReference, сильную ссылку держит SettingsActivity
     private var onRecordDoneRef: WeakReference<(List<PresetAction>) -> Unit>? = null
@@ -316,6 +358,19 @@ class ClickService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        // ФИКС (v38, перф): кешируем Vibrator один раз. На API 31+
+        // достаём через VibratorManager.defaultVibrator (это и есть
+        // Vibrator), ниже — старый VIBRATOR_SERVICE. runCatching на
+        // случай странной прошивки, где cast мажет
+        vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            runCatching {
+                (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager)
+                    .defaultVibrator
+            }.getOrNull()
+        } else {
+            @Suppress("DEPRECATION")
+            runCatching { getSystemService(Context.VIBRATOR_SERVICE) as Vibrator }.getOrNull()
+        }
         lastPreset = restoreLastPreset()
         crosshairHidden = runCatching {
             getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
@@ -393,6 +448,10 @@ class ClickService : AccessibilityService() {
         tvProgress = null
         lastCounterText = null
         lastProgressText = null
+        // ФИКС (v38, перф): освобождаем кеш Vibrator — при следующем
+        // onServiceConnected он пересоздастся (не обязательно, но
+        // симметрично с другими полями)
+        vibrator = null
         super.onDestroy()
     }
 
@@ -462,21 +521,17 @@ class ClickService : AccessibilityService() {
         if (LOG_DEBUG) Log.d(TAG, msg())
     }
 
-    /** ФИЧА: короткий клик-виброотклик (если включён HAPTIC_ENABLED) */
+    /** ФИЧА: короткий клик-виброотклик (если включён HAPTIC_ENABLED).
+     *  ФИКС (v38, перф): Vibrator кешируется в onServiceConnected —
+     *  больше не дёргаем getSystemService и cast на каждое нажатие кнопки */
     private fun haptic() {
         if (!HAPTIC_ENABLED) return
+        val v = vibrator ?: return
         runCatching {
-            val vib = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager)
-                    .defaultVibrator
-            } else {
-                @Suppress("DEPRECATION")
-                getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-                vib.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK))
+                v.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK))
             else
-                vib.vibrate(20L)
+                v.vibrate(20L)
         }
     }
 
@@ -790,7 +845,9 @@ class ClickService : AccessibilityService() {
                 toast("Следующее действие: $n из $size")
             }
             // Прыжок = перенос ближайшего тика: оставшаяся пауза до следующего
-            // действия пропускается; летящий жест tick дождётся (цикл 20 мс)
+            // действия пропускается; летящий жест tick дождётся через
+            // gestureCallback.onCompleted (v38: busy-poll 20 мс убран,
+            // ожидание полностью event-driven через pendingTick флаг)
             handler.removeCallbacks(tick)
             handler.post(tick)
         } else {
@@ -1552,14 +1609,67 @@ class ClickService : AccessibilityService() {
      * ФИКС: уважает и кнопку ⊘ панели — если пользователь скрыл
      * визуальных помощников, маркеры не возвращаются (рестарт службы,
      * остановка playback, закрытие оверлеев).
+     *
+     * ФИКС (v38, перф): раньше полный re-build на каждом вызове —
+     * removeView всех маркеров + inflate заново R.layout.point_marker
+     * для каждого действия. На пресете из 20 точек это 20 inflations
+     * за один вызов. Вызывается часто: stopPlayback, hidePickOverlay,
+     * toggleCrosshair, ensureOverlays, stopRecordingInternal — то есть
+     * почти из каждого пользовательского действия. Теперь если размер
+     * списка действий НЕ изменился — in-place обновление позиций и
+     * номеров через wm.updateViewLayout + setText, без re-inflate.
+     * Полный re-build только при изменении размера (добавление/удаление
+     * точки, смена пресета).
      */
     private fun refreshMtwsMarkers() {
+        // Сначала все охранные выходы — они зовут hideMtwsMarkers()
+        // (полный tear-down). Если их пропустить, а потом пойти в
+        // in-place путь, маркеры останутся на экране, где их быть не должно.
+        if (playing || recording || pickOverlay != null) {
+            hideMtwsMarkers()
+            return
+        }
+        if (crosshairHidden) {
+            hideMtwsMarkers()
+            return
+        }
+        val preset = lastPreset ?: run {
+            hideMtwsMarkers()
+            return
+        }
+        if (preset.mode != "MTWS") {
+            hideMtwsMarkers()
+            return
+        }
+        if (preset.actions.isEmpty()) {
+            hideMtwsMarkers()
+            return
+        }
+
+        val newSize = preset.actions.size
+        val currentSize = mtwsMarkers.size
+        if (newSize == currentSize && currentSize > 0) {
+            // In-place: размер не изменился — двигаем окна и обновляем
+            // номера. Позиции могут отличаться (пользователь перетащил
+            // крестик, или пресет подменён через PresetStorage.save).
+            val half = 16f * resources.displayMetrics.density // маркер 32dp
+            for (i in 0 until newSize) {
+                val marker = mtwsMarkers[i]
+                marker.index = i
+                val a = preset.actions[i]
+                val p = marker.params
+                p.x = (a.x1.toFloat() - half).toInt()
+                p.y = (a.y1.toFloat() - half).toInt()
+                marker.view.findViewById<TextView>(R.id.tvPointNum)?.text = (i + 1).toString()
+                runCatching { wm.updateViewLayout(marker.view, p) }
+            }
+            return
+        }
+
+        // Размер изменился (добавили/удалили точку или сменили пресет) —
+        // полный re-build. Перенумерация всех маркеров обязательна: при
+        // удалении точки i все маркеры после i должны получить новые номера.
         hideMtwsMarkers()
-        if (playing || recording || pickOverlay != null) return
-        // ФИКС: кнопка ⊘ панели скрывает помощников — не возвращаем их за её спиной
-        if (crosshairHidden) return
-        val preset = lastPreset ?: return
-        if (preset.mode != "MTWS") return
         preset.actions.forEachIndexed { i, a ->
             addMtwsMarker(i, a.x1.toFloat(), a.y1.toFloat())
         }
@@ -1590,7 +1700,10 @@ class ClickService : AccessibilityService() {
             .getOrElse { Log.e(TAG, "addMtwsMarker: inflate failed", it); return }
         v.findViewById<TextView>(R.id.tvPointNum)?.text = (index + 1).toString()
 
-        val marker = MtwsMarker(v, index)
+        // ФИКС (v38, перф): params хранится в маркере, refresh обновляет
+        // позицию через тот же объект — touch-listener и refresh разделяют
+        // состояние без рассинхрона
+        val marker = MtwsMarker(v, index, p)
         mtwsMarkers.add(marker)
         if (runCatching { wm.addView(v, p) }.isFailure) {
             mtwsMarkers.remove(marker)
@@ -1843,6 +1956,9 @@ class ClickService : AccessibilityService() {
         cancelStaleGesture()
         gestureInFlight = false
         consecutiveCancels = 0
+        // ФИКС (v38, перф): сброс pendingTick — мог остаться от прошлой
+        // сессии, если она завершилась через stopPlayback посреди жеста
+        pendingTick = false
         clickCount = 0
         playing = true
         // ФИЧА (v31): экран не гаснет, пока играет пресет (паузы MTWS
@@ -1903,6 +2019,11 @@ class ClickService : AccessibilityService() {
         // dispatchGesture по контракту отменяет текущие жесты сервиса
         cancelStaleGesture()
         gestureInFlight = false
+        // ФИКС (v38, перф): сброс pendingTick — мог быть выставлен tick'ом
+        // перед самым stopPlayback. Даже если оставить, gestureCallback
+        // посмотрит на playing==false и не постит tick — но флаг
+        // очистим явно, чтобы не было «висячего» true между сессиями
+        pendingTick = false
         // ФИЧА (v24): ручная навигация продолжает с места остановки — последним
         // выполненным считаем действие, на котором playback остановился.
         // После полного прогона цикла (actionIndex уже обнулился) — последнее
@@ -2011,7 +2132,7 @@ class ClickService : AccessibilityService() {
             // приложение на части прошивок (особенно при быстрых тапах,
             // когда onCompleted приходил раньше, чем UI успевал уйти).
             // Флаги @Volatile обновляем синхронно — они нужны для
-            // разблокировки следующего tick'а (poll 20 мс)
+            // разблокировки следующего tick'а.
             gestureInFlight = false
             consecutiveCancels = 0
             // UI-мутации — через handler.post, всегда на главном
@@ -2022,13 +2143,21 @@ class ClickService : AccessibilityService() {
                 // завершённый жест — клик сценария и попадает в счётчик)
                 clickCount++
                 updateCounter()
+                // ФИКС (v38, перф): разбудить tick, если он ждал завершения
+                // жеста (pendingTick=true). См. комментарий в tick — раньше
+                // там был busy-poll каждые 20 мс.
+                if (pendingTick) {
+                    pendingTick = false
+                    if (playing) handler.post(tick)
+                }
             }
         }
 
         override fun onCancelled(g: GestureDescription?) {
             // ФИКС (v37, краш): см. onCompleted — UI-мутации через handler.post.
-            // Флаги обновляем синхронно (gestureInFlight — иначе tick уйдёт
-            // в busy-poll навсегда, ожидая несуществующий «летающий» жест)
+            // Флаги обновляем синхронно (gestureInFlight — иначе tick зависнет
+            // в ожидании несуществующего «летающего» жеста, т.к. busy-poll
+            // убран в v38 и ожидание стало полностью event-driven)
             gestureInFlight = false
             // ФИКС: серия подряд отменённых жестов обычно означает, что жесты
             // блокирует оверлей либо координаты вне экрана. Раньше playback
@@ -2045,6 +2174,16 @@ class ClickService : AccessibilityService() {
                 handler.post {
                     stopPlayback()
                     toast("Жесты блокируются — воспроизведение остановлено")
+                }
+            } else if (playing) {
+                // ФИКС (v38, перф): отмена ниже порога MAX_CONSECUTIVE_CANCELS —
+                // playback продолжается, нужно разбудить tick (иначе он зависнет
+                // в ожидании onCompleted, который не придёт — жест отменён)
+                handler.post {
+                    if (pendingTick) {
+                        pendingTick = false
+                        handler.post(tick)
+                    }
                 }
             }
         }
@@ -2063,7 +2202,15 @@ class ClickService : AccessibilityService() {
             if (shouldStop) { stopPlayback(resetToStart = true); return }
 
             if (gestureInFlight) {
-                handler.postDelayed(this, 20L)
+                // ФИКС (v38, перф): РАНЬШЕ — handler.postDelayed(this, 20L),
+                // busy-poll каждые 20 мс, пока летит жест. На длинных свайпах
+                // (swipeDurationMs до 5000 мс) это до 250 бессмысленных
+                // postDelayed в секунду. ТЕПЕРЬ — ставим pendingTick=true
+                // и выходим; gestureCallback.onCompleted/onCancelled при
+                // завершении жеста постит tick снова (см. handler.post в
+                // gestureCallback). Если к этому моменту playing уже false
+                // (стоп), tick.run выйдет по раннему return — флаг безопасен.
+                pendingTick = true
                 return
             }
 
@@ -2134,6 +2281,10 @@ class ClickService : AccessibilityService() {
                 // действия (actionIndex уже инкрементирован, т.е. 1-based).
                 // ФИКС (v36): nextActionAtMs удалён — мёртвое поле после v35
                 progressActionNo = actionIndex
+                // ФИКС (v38, перф): обновляем прогресс напрямую из tick —
+                // uiTicker теперь раз в секунду (см. фикс 2.6), и
+                // 250-мс polling больше не ловит смену действия вовремя
+                updateProgress()
                 handler.postDelayed(this, nextDelay.coerceAtLeast(MIN_DELAY_MS))
             }
         }
@@ -2209,6 +2360,10 @@ class ClickService : AccessibilityService() {
         recordedActions = mutableListOf()
         lastRecTime = System.currentTimeMillis()
         lastRecordResult = null
+        // ФИКС (v38, OOM): сброс флага потолка при старте новой сессии —
+        // даже если предыдущая завершилась не через stopRecordingInternal
+        // (например,.onDestroy службы)
+        recordingFullNotified = false
         // ФИЧА: новая сессия записи начинается без хвостов предпросмотра
         handler.removeCallbacks(replayRunnable)
         replayInFlight = false
@@ -2237,6 +2392,9 @@ class ClickService : AccessibilityService() {
         // доиграется в приложении — это безвредно (предпросмотр и так виден)
         handler.removeCallbacks(replayRunnable)
         replayInFlight = false
+        // ФИКС (v38, OOM): сброс флага потолка — следующая запись снова
+        // копит до MAX_RECORDED_ACTIONS
+        recordingFullNotified = false
         hideRecordOverlay()
         val result = recordedActions.toList()
         // Страховка: результат переживает уничтожение окна настроек —
@@ -2354,6 +2512,21 @@ class ClickService : AccessibilityService() {
                     // ПРЕДЫДУЩЕГО действия (потом её можно отредактировать в
                     // настройках). Новое действие добавляется с задержкой 0
                     val now = System.currentTimeMillis()
+                    // ФИКС (v38, OOM): потолок записанных действий. Без него
+                    // многочасовая запись переполняла бы память. Тост один
+                    // раз (recordingFullNotified), потом тихо игнорим —
+                    // recordedActions не растёт, live preview тоже не зовём.
+                    if (recordedActions.size >= MAX_RECORDED_ACTIONS) {
+                        if (!recordingFullNotified) {
+                            recordingFullNotified = true
+                            toast("Достигнут максимум — $MAX_RECORDED_ACTIONS действий. " +
+                                  "Остановите запись")
+                        }
+                        // Сбрасываем down-точку, чтобы следующий тап не
+                        // записал «длинную паузу» с момента превышения
+                        lastRecTime = now
+                        return@setOnTouchListener true
+                    }
                     if (recordedActions.isNotEmpty()) {
                         val gap = (now - lastRecTime).coerceIn(0L, MAX_REC_GAP_MS)
                         val li = recordedActions.size - 1

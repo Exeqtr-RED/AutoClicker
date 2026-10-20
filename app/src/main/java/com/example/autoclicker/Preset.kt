@@ -118,7 +118,10 @@ object PresetStorage {
                 runCatching { Preset.fromJson(arr.getJSONObject(i)) }.getOrNull()
             }
         }.getOrDefault(emptyList())
-        cache = parsed
+        // ФИКС (v38, корректность): defensive copy. mapNotNull возвращает
+        // ArrayList под типом List — внешние кастинги могли бы мутировать
+        // кэш в обход save/delete. toList() даёт неизменяемую копию.
+        cache = parsed.toList()
         return parsed
     }
 
@@ -143,7 +146,11 @@ object PresetStorage {
         list.forEach { arr.put(it.toJson()) }
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
             .edit().putString(KEY, arr.toString()).apply()
-        // ФИКС (v36): кэш синхронен с хранилищем сразу после записи
-        cache = list
+        // ФИКС (v36): кэш синхронен с хранилищем сразу после записи.
+        // ФИКС (v38, корректность): defensive copy — вызывающий код
+        // передаёт MutableList (save/delete зовут persist(ctx, all)),
+        // и мог бы продолжить мутировать его после persist. toList()
+        // разрывает ссылку: будущие мутации all не заденут кэш.
+        cache = list.toList()
     }
 }
