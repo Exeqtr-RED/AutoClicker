@@ -155,19 +155,56 @@
                     android:paddingTop="2dp"
                     android:text="Число у действия — задержка после него (мс). Пауза перед повторным запуском пресета задаётся полем «Периодичность запуска»." />
 
-                <Button
-                    android:id="@+id/btnClearActions"
+                <LinearLayout
                     android:layout_width="match_parent"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="8dp"
-                    android:minWidth="0dp"
-                    android:background="@drawable/btn_secondary"
-                    app:backgroundTint="@null"
-                    android:stateListAnimator="@null"
-                    android:textSize="15sp"
-                    android:textColor="@color/text_primary"
-                    android:textAllCaps="false"
-                    android:text="Очистить действия" />
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="8dp">
+
+                    <!-- ФИЧА (v39): «Добавить действие» — входит в режим вставки:
+                         между действиями появляются зелёные +, тап по + запускает
+                         запись одного тапа/свайпа и вставляет его на выбранное место.
+                         ФИКС (v40): textSize 15sp → 13sp — на узких экранах / в
+                         плавающем окне «Добавить действие» не помещалось в кнопку
+                         и обрезалось. Шрифт уменьшен у ОБЕИХ кнопок пары —
+                         визуальная симметрия важнее, чем каждая отдельно -->
+                    <Button
+                        android:id="@+id/btnAddAction"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_weight="1"
+                        android:layout_marginEnd="4dp"
+                        android:minWidth="0dp"
+                        android:background="@drawable/btn_secondary_green"
+                        app:backgroundTint="@null"
+                        android:stateListAnimator="@null"
+                        android:textSize="13sp"
+                        android:textStyle="bold"
+                        android:textColor="@color/white"
+                        android:textAllCaps="false"
+                        android:maxLines="1"
+                        android:ellipsize="end"
+                        android:text="Добавить действие" />
+
+                    <!-- ФИКС (v40): «Удалить всё» — красная пилюля (btn_secondary_red),
+                         симметричная зелёной. Красный = деструктивное действие -->
+                    <Button
+                        android:id="@+id/btnClearActions"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_weight="1"
+                        android:layout_marginStart="4dp"
+                        android:minWidth="0dp"
+                        android:background="@drawable/btn_secondary_red"
+                        app:backgroundTint="@null"
+                        android:stateListAnimator="@null"
+                        android:textSize="13sp"
+                        android:textColor="@color/white"
+                        android:textAllCaps="false"
+                        android:maxLines="1"
+                        android:ellipsize="end"
+                        android:text="Удалить всё" />
+                </LinearLayout>
             </LinearLayout>
 
             <TextView

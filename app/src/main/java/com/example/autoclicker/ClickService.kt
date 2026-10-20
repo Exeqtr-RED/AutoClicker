@@ -343,6 +343,14 @@ class ClickService : AccessibilityService() {
     // ФИКС: результат записи переживает пересоздание окна настроек —
     // забирается в SettingsActivity.onResume() через consumeRecordResult()
     private var lastRecordResult: List<PresetAction>? = null
+    // ФИЧА (v39): single-action запись для вставки одного действия между
+    // существующими. Колбэк получает ОДНО действие (tap или swipe —
+    // определяется по движению пальца на оверлее) либо null, если
+    // пользователь нажал «Остановить» без единого ACTION_UP. WeakReference
+    // — сильную ссылку держит активность (pendingInsertCb), как и для
+    // pick/record. recordedActions НЕ трогается — это для обычной записи,
+    // single-action callers управляют своим списком сами
+    private var singleActionCb: WeakReference<(PresetAction?) -> Unit>? = null
     private var downX = 0f
     private var downY = 0f
     private var downTime = 0L
@@ -432,6 +440,8 @@ class ClickService : AccessibilityService() {
         // ФИКС (утечка памяти): колбэки и результаты — вместе с окнами
         pickOnDoneRef = null
         onRecordDoneRef = null
+        // ФИЧА (v39): то же для single-action колбэка
+        singleActionCb = null
         pickEditorMode = "ST"
         editorTaskId = -1
         lastPickResult = null
@@ -2395,6 +2405,13 @@ class ClickService : AccessibilityService() {
         // ФИКС (v38, OOM): сброс флага потолка — следующая запись снова
         // копит до MAX_RECORDED_ACTIONS
         recordingFullNotified = false
+        // ФИКС (v39): если stopRecordingInternal зовут в single-action режиме
+        // (внешний вызов ✕ панели, например), обнуляем колбэк. Сам action
+        // при этом потерян — но это редакс stopRecordingInternal, а не
+        // stopSingleActionRecording; если caller хочет получить действие,
+        // он должен звать stopSingleActionRecording. Для ✕ панели потеря
+        // приемлема — пользователь явно отменил
+        singleActionCb = null
         hideRecordOverlay()
         val result = recordedActions.toList()
         // Страховка: результат переживает уничтожение окна настроек —
@@ -2410,6 +2427,67 @@ class ClickService : AccessibilityService() {
             lastRecordResult = null
             cb.invoke(result)
         }
+    }
+
+    /**
+     * ФИЧА (v39): запуск записи ОДНОГО действия (тап или свайп — система
+     * определит по движению пальца на оверлее) для вставки между
+     * существующими действиями пресета. Не трогает recordedActions — это
+     * для обычной многошаговой записи, здесь caller управляет своим
+     * списком сам (через колбэк). Запись автоматически останавливается
+     * после первого ACTION_UP (см. showRecordOverlay) — пользователю не
+     * нужно нажимать «Остановить». Если он всё же нажал без единого тапа —
+     * колбэк получит null (отмена).
+     *
+     * Возвращает true, если запись реально началась. false — служба
+     * занята (идёт обычная запись или playback).
+     */
+    fun startSingleActionRecording(onDone: (PresetAction?) -> Unit): Boolean {
+        if (recording || playing) return false
+        // Не трогаем recordedActions и lastRecordResult — они для обычной
+        // записи. Single-action caller в колбэке сам управляет позицией
+        // вставки в свой список действий.
+        // lastRecTime не нужен — пауза между действиями здесь не вычисляется
+        // (одно действие → нет предыдущего, до которого мерить gap).
+        recordingFullNotified = false
+        handler.removeCallbacks(replayRunnable)
+        replayInFlight = false
+        singleActionCb = WeakReference(onDone)
+        if (!showRecordOverlay()) {
+            singleActionCb = null
+            return false
+        }
+        recording = true
+        hideMtwsMarkers()
+        hidePresetList()
+        updatePanelState()
+        updateBubbleIcon()
+        return true
+    }
+
+    /**
+     * ФИЧА (v39): остановка single-action записи. Вызывается из
+     * showRecordOverlay ACTION_UP (с записанным действием) или из
+     * showRecordStopButton click listener (с null — отмена). Не трогает
+     * recordedActions. Колбэк получает action (или null). Один вызов —
+     * одно завершение, singleActionCb обнуляется сразу.
+     */
+    private fun stopSingleActionRecording(action: PresetAction?, bringBackEditor: Boolean) {
+        if (!recording) return
+        recording = false
+        // live replay мог быть отложен (REPLAY_DELAY_MS) — снимаем. Жест,
+        // уже переданный системе, доиграется в приложении — безвредно
+        handler.removeCallbacks(replayRunnable)
+        replayInFlight = false
+        recordingFullNotified = false
+        hideRecordOverlay()
+        val cb = singleActionCb?.get()
+        singleActionCb = null
+        refreshMtwsMarkers()
+        updatePanelState()
+        updateBubbleIcon()
+        if (bringBackEditor) bringBackSettingsEditor()
+        cb?.invoke(action)
     }
 
     /** ФИЧА: поднять окно настроек после остановки записи / выбора точки.
@@ -2544,6 +2622,16 @@ class ClickService : AccessibilityService() {
                             upX.toInt(), upY.toInt(),
                             dt.coerceIn(50L, 5000L), delayMs = 0L)
                     }
+                    // ФИЧА (v39): single-action режим — записали одно действие,
+                    // дальше не идём. recordedActions не трогаем (это для
+                    // обычной многошаговой записи), live replay не запускаем
+                    // (одно действие — пользователь увидит результат в редакторе
+                    // после возврата; предпросмотр тут избыточен и мешал бы
+                    // быстрому возврату окна). Автостат и колбэк с действием.
+                    if (singleActionCb != null) {
+                        stopSingleActionRecording(action, bringBackEditor = true)
+                        return@setOnTouchListener true
+                    }
                     recordedActions.add(action)
                     // ФИЧА (v23): счётчик на оверлее записи — сразу видно прогресс
                     updateRecCountOverlay()
@@ -2580,7 +2668,18 @@ class ClickService : AccessibilityService() {
         recCountOverlayRef = v.findViewById(R.id.tvRecCountOverlay)
         updateRecCountOverlay()
         v.findViewById<View>(R.id.stopRecordBtn)?.setOnClickListener {
-            stopRecordingInternal(bringBackEditor = true)
+            // ФИЧА (v39): в single-action режиме стоп-кнопка отменяет
+            // вставку — зовём stopSingleActionRecording с null. Иначе
+            // это обычная многошаговая запись → stopRecordingInternal.
+            // Обе функции безопасны при повторном вызове (ранний return
+            // если !recording), так что гонка «тап по стоп + ACTION_UP
+            // одновременно» не крашит — выигрывает тот, кто первым
+            // поставит recording=false
+            if (singleActionCb != null) {
+                stopSingleActionRecording(null, bringBackEditor = true)
+            } else {
+                stopRecordingInternal(bringBackEditor = true)
+            }
         }
         if (runCatching { wm.addView(v, p) }.isFailure) {
             Log.e(TAG, "showRecordStopButton: addView failed")

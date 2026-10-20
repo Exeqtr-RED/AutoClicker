@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ФИЧА (v40): красная пилюля — симметричная btn_secondary_green,
+     используется для деструктивных действий («Удалить всё»).
+     Форма и радиус как у btn_secondary_green, чтобы пара кнопок
+     «Добавить действие» / «Удалить всё» выглядела визуально симметрично -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#40FFFFFF">
+    <item>
+        <shape>
+            <gradient
+                android:angle="315"
+                android:startColor="@color/accent_red"
+                android:endColor="#FFFF2B2B" />
+            <stroke android:width="1dp" android:color="#59FFFFFF" />
+            <corners android:radius="22dp" />
+        </shape>
+    </item>
+</ripple>

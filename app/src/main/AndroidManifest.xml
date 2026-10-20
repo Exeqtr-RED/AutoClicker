@@ -5,6 +5,13 @@
     <!-- ФИКС (v18): поднять ЗАДАЧУ редактора целиком (ActivityManager.moveTaskToFront)
          из службы после выбора точки / остановки записи -->
     <uses-permission android:name="android.permission.REORDER_TASKS" />
+    <!-- ФИКС (v40): haptic() зовёт Vibrator.vibrate — без этого permission
+         на Android 12+ система логирует warning "Missing permissions required
+         by Vibrator.vibrate: android.permission.VIBRATE" (без бросания
+         исключения, runCatching не ловит) и вибро тихо не работает.
+         Normal permission (Protection level: normal) — granted at install,
+         runtime prompt НЕ нужен -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <application
         android:allowBackup="true"

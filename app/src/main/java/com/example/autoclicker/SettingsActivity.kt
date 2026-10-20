@@ -81,6 +81,14 @@ class SettingsActivity : AppCompatActivity() {
     // не удерживается службой
     private var pendingPickCb: ((Int, Int) -> Unit)? = null
     private var pendingRecordCb: ((List<PresetAction>) -> Unit)? = null
+    // ФИЧА (v39): колбэк для вставки одного действия (tap/swipe). Сильная
+    // ссылка здесь, WeakReference в службе — как и для pick/record
+    private var pendingInsertCb: ((PresetAction?) -> Unit)? = null
+
+    // ФИЧА (v39): режим вставки — между действиями показываются зелёные +
+    // кнопки, тап по + запускает запись одного действия и вставляет его
+    // на выбранную позицию. false = обычный список действий
+    private var insertMode = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -160,9 +168,19 @@ class SettingsActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnSave).setOnClickListener { savePreset() }
         findViewById<Button>(R.id.btnRecord).setOnClickListener { startRecording() }
         findViewById<Button>(R.id.btnClearActions).setOnClickListener {
+            // ФИЧА (v39): кнопка переименована в «Удалить всё». Также
+            // снимает режим вставки, если был активен (иначе + кнопки
+            // остались бы висеть на пустом списке)
+            insertMode = false
             recordedActions.clear()
             updateRecCount()
             rebuildActionsList()
+        }
+        // ФИЧА (v39): «Добавить действие» — входит в режим вставки.
+        // Между действиями появляются зелёные +, тап по + запускает
+        // запись одного тапа/свайпа и вставляет его на выбранное место
+        findViewById<Button>(R.id.btnAddAction).setOnClickListener {
+            toggleInsertMode()
         }
         btnStart.setOnClickListener { startPlayback() }
         btnStop.setOnClickListener { stopPlayback() }
@@ -265,6 +283,8 @@ class SettingsActivity : AppCompatActivity() {
         // колбэки; WeakReference в службе очистится, утечки активности нет
         pendingPickCb = null
         pendingRecordCb = null
+        // ФИЧА (v39): то же для колбэка вставки одного действия
+        pendingInsertCb = null
         // ФИКС (v18): явный выход («Назад») — черновик не нужен;
         // уничтожение СИСТЕМОЙ в фоне — сохраняем введённое для восстановления
         if (isFinishing) clearDraft() else writeDraft()
@@ -634,10 +654,131 @@ class SettingsActivity : AppCompatActivity() {
 
     // ---------- Редактируемый список записанных действий ----------
 
-    /** Пересобирает список действий: описание + поле задержки + удаление */
+    /**
+     * Пересобирает список действий: описание + поле задержки + удаление.
+     * ФИЧА (v39): в режиме insertMode между каждой парой действий (и в
+     * начале/конце списка) добавляется зелёная кнопка «+», по тапу на
+     * которую запускается запись одного тапа/свайпа и вставка на это место.
+     * Позиция i для + кнопки означает «вставить перед действием i»
+     * (i = 0 → в начало списка, i = recordedActions.size → в конец).
+     * recordedActions.add(i, action) вставит новый элемент по индексу i.
+     */
     private fun rebuildActionsList() {
+        // Сохранить незакоммиченные правки задержек из полей ввода — иначе
+        // перестроение строк потеряет то, что пользователь уже набрал
+        commitDelaysFromEditors()
         llActions.removeAllViews()
-        recordedActions.forEachIndexed { i, a -> llActions.addView(makeActionRow(i, a)) }
+        if (insertMode) {
+            // + перед каждым действием + ещё один + в самом конце
+            // → всего (recordedActions.size + 1) кнопок вставки
+            for (i in 0..recordedActions.size) {
+                llActions.addView(makeInsertButton(i))
+                if (i < recordedActions.size) {
+                    llActions.addView(makeActionRow(i, recordedActions[i]))
+                }
+            }
+        } else {
+            recordedActions.forEachIndexed { i, a ->
+                llActions.addView(makeActionRow(i, a))
+            }
+        }
+    }
+
+    /**
+     * ФИЧА (v39): зелёная кнопка «+» — индикатор места вставки. Тап по ней
+     * запускает запись одного действия (тап или свайп — определяется по
+     * движению пальца на оверлее записи) и вставляет его на позицию [position].
+     * Стилистика — accent_green пилюля (btn_secondary_green) с крупным «+»
+     * шрифтом, чтобы кнопка визуально отличалась от строк действий.
+     */
+    private fun makeInsertButton(position: Int): View {
+        return Button(this).apply {
+            text = "+"
+            textSize = 20f
+            isAllCaps = false
+            setTextColor(ContextCompat.getColor(context, R.color.white))
+            setBackgroundResource(R.drawable.btn_secondary_green)
+            stateListAnimator = null
+            minHeight = 0  // иначе min = 56dp по умолчанию у Material — большая
+            minimumHeight = dp(36)
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(3)
+                bottomMargin = dp(3)
+            }
+            layoutParams = lp
+            setOnClickListener { insertActionAt(position) }
+        }
+    }
+
+    /**
+     * ФИЧА (v39): вход/выход из режима вставки. Повторный тап по «Добавить
+     * действие» (или тап по «Удалить всё», или старт/стоп записи) снимает
+     * режим — + кнопки пропадают, список возвращается к обычному виду.
+     */
+    private fun toggleInsertMode() {
+        commitDelaysFromEditors()
+        insertMode = !insertMode
+        rebuildActionsList()
+        if (insertMode) {
+            toast("Тапните +, чтобы выбрать место для нового действия")
+        }
+    }
+
+    /**
+     * ФИЧА (v39): запускает запись ОДНОГО действия (тап или свайп — система
+     * определит по движению пальца на оверлее) и вставляет его в
+     * recordedActions на позицию [position]. Сильная ссылка на колбэк
+     * хранится в pendingInsertCb (как pendingPickCb/pendingRecordCb),
+     * WeakReference в службе.
+     * После возврата в редактор (служба поднимает его через
+     * bringBackSettingsEditor) — действие добавлено и список пересобран.
+     * null в колбэке = пользователь нажал «Остановить» без единого тапа —
+     * вставка отменена, показываем тост.
+     */
+    private fun insertActionAt(position: Int) {
+        val svc = ClickService.instance
+        if (svc == null) {
+            toast("Служба Accessibility не включена")
+            return
+        }
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            toast("Нет разрешения на оверлей")
+            return
+        }
+        // Выходим из режима вставки ДО запуска записи — иначе + кнопки
+        // останутся на экране под оверлеем записи (хотя overlay и поверх,
+        // при возврате список ещё не пересобран — мелочь, но чисто)
+        insertMode = false
+        rebuildActionsList()
+
+        val targetPos = position.coerceIn(0, recordedActions.size)
+        val cb: (PresetAction?) -> Unit = { action ->
+            pendingInsertCb = null
+            runOnUiThread {
+                if (action != null) {
+                    val safePos = targetPos.coerceIn(0, recordedActions.size)
+                    recordedActions.add(safePos, action)
+                    updateRecCount()
+                    rebuildActionsList()
+                    toast("Действие вставлено на позицию ${safePos + 1}")
+                } else {
+                    toast("Вставка отменена")
+                }
+            }
+        }
+        pendingInsertCb = cb
+        val started = svc.startSingleActionRecording(cb)
+        if (!started) {
+            toast("Нельзя вставить действие во время записи/воспроизведения")
+            pendingInsertCb = null
+            return
+        }
+        svc.noteEditorTask(taskId)
+        writeDraft()
+        moveTaskToBack(true)
     }
 
     private fun makeActionRow(index: Int, a: PresetAction): View {
