@@ -499,6 +499,69 @@ class ClickService : AccessibilityService() {
         return r
     }
 
+    /**
+     * ФИКС (v42, баг S2): геттер для последнего активного пресета службы.
+     * Служба хранит его в приватном поле lastPreset; SettingsActivity при
+     * удалении пресета из PresetStorage должен проверить, не является ли
+     * удалённый пресет активным в службе — и если да, очистить (иначе
+     * «призрак» удалённого пресета продолжает работать после play с
+     * плавающей панели).
+     */
+    fun getLastPreset(): Preset? = lastPreset
+
+    /**
+     * ФИКС (v42, баг S2): очистить lastPreset (и state-pref) — вызывается
+     * из SettingsActivity.confirmDelete, когда пользователь удаляет пресет,
+     * совпадающий с активным в службе. Без этого play с плавающей панели
+     * после удаления продолжал бы играть УДАЛЁННЫЙ пресет (он переживал в
+     * памяти службы + state-pref до перезапуска устройства).
+     *
+     * Безопасно вызывать во время playback — stopPlayback чистит оверлеи.
+     * Вызов вне playback — тоже безопасно (stopPlayback выйдет рано по
+     * !playing). Маркеры/крестик остаются как есть — после очистки их
+     * не для чего показывать, но скрывать не обязательно: пользователь
+     * увидит пустую панель при следующем открытии.
+     */
+    fun clearLastPreset() {
+        if (playing) stopPlayback()
+        lastPreset = null
+        // ФИКС (v42, S5): commit, не apply — синхронная запись, чтобы
+        // пользователь увидел пустую панель даже если сразу убьёт приложение
+        runCatching {
+            getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
+                .edit().remove(KEY_LAST_PRESET).commit()
+        }
+        updatePanelState()
+        updateBubbleIcon()
+    }
+
+    /**
+     * ФИКС (v42, баг S6): обновить lastPreset, если сохранённый пресет
+     * совпадает по (name, mode) с текущим активным. Без этого play с
+     * плавающей панели после правки пресета в редакторе играл бы СТАРУЮ
+     * версию — пользователь удивлялся, почему изменения «не применились».
+     *
+     * Возвращает true, если lastPreset был обновлён (совпал и заменён),
+     * false — если не совпал (тогда пользователь должен явно выбрать
+     * пресет через ☰ на плавающей панели).
+     *
+     * НЕ запускает playback, только подменяет пресет в памяти и state-pref.
+     * Если playback уже идёт — обновляет currentPreset (новые параметры
+     * применятся со следующего тика: задержка, координаты действий, и т.д.).
+     */
+    fun updateLastPresetIfMatches(preset: Preset): Boolean {
+        val lp = lastPreset ?: return false
+        if (lp.name != preset.name || lp.mode != preset.mode) return false
+        // Присваиваем новое значение — copy с updated fields
+        lastPreset = preset
+        if (playing) currentPreset = preset
+        persistLastPreset(preset)
+        // Если playing, строки панели (progress, tvPresetName) обновятся
+        // на следующем тике uiTicker'а — это нормально
+        updatePanelState()
+        return true
+    }
+
     private fun overlayType(): Int =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -2793,10 +2856,21 @@ class ClickService : AccessibilityService() {
      */
     private fun persistLastPreset(preset: Preset) {
         runCatching {
+            // ФИКС (v42, баг S5): apply → commit. apply() асинхронно —
+            // правка (drag крестика/маркера, изменение задержки в редакторе
+            // панели) могла потеряться, если пользователь сразу убивал
+            // приложение (force-stop / OOM kill) до того, как фоновый
+            // writer успевал сработать. commit() синхронный — ждёт записи
+            // на диск, ~5-15 мс на современных флешках, незаметно.
+            //
+            // persistLastPreset зовётся редко (только на правки с плавающей
+            // панели), не на каждом тике — синхронная запись тут дёшево.
+            // Сравните с writeDraft в SettingsActivity — там тоже commit()
+            // для той же причины (пережить гибель процесса).
             getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_LAST_PRESET, preset.toJson().toString())
-                .apply()
+                .commit()
         }
     }
 
