@@ -276,17 +276,20 @@ class ClickService : AccessibilityService() {
     // многочасовом playback. Тикер безопасен при свёрнутой панели:
     // updateCounter()/updateProgress() просто выходят, если панель не показана
     // ФИКС (v38, перф, батарея): интервал 250 мс → 1000 мс. Тикер
-    // обновляет секундный таймер (естественная 1-секундная гранулярность)
-    // и раньше обновлял прогресс MTWS — теперь прогресс зовётся напрямую
-    // из tick после progressActionNo = actionIndex (мгновенно при смене
-    // действия). updateCounter/updateProgress с кэшем lastCounterText/
-    // lastProgressText пропускают одинаковые setText — но сами пробуждения
-    // хендлера 4 раза в секунду на многочасовом playback всё равно
-    // будили CPU. 1 раз в секунду — достаточно для таймера.
+    // обновляет секундный таймер (естественная 1-секундная гранулярность).
+    // updateCounter с кэшем lastCounterText пропускает одинаковые setText —
+    // но сами пробуждения хендлера 4 раза в секунду на многочасовом playback
+    // всё равно будили CPU. 1 раз в секунду — достаточно.
+    //
+    // ФИЧА (v43): вернули updateProgress в тикер — он теперь тоже рисует
+    // обратный отсчёт «· MM:SS» до следующего действия. 1-сек интервал
+    // достаточен: отсчёт показывает минуты:секунды, ниже 1 секунды
+    // granularity не нужна. Кэш lastProgressText пропускает одинаковые
+    // setText — в ST-режиме или простое вызов дёшев (ранний return).
     private val uiTicker = object : Runnable {
         override fun run() {
             updateCounter()
-            // updateProgress убран — зовётся из tick при смене действия
+            updateProgress()
             if (playing) handler.postDelayed(this, 1000L)
         }
     }
@@ -328,6 +331,18 @@ class ClickService : AccessibilityService() {
     // потока (tick — главный, gestureCallback.post — главный), но
     // @Volatile для ясности и на случай будущих изменений
     @Volatile private var pendingTick = false
+
+    // ФИЧА (v43): плановый момент СЛЕДУЮЩЕГО действия (System.currentTimeMillis()
+    // + postDelayed, ставит tick при планировании) — по нему тикер панели
+    // рисует обратный отсчёт в строке прогресса MTWS. Формат: «мин:сек» —
+    // «Клик 3/15 · 01:05». 0 = отсчёта нет (простой/остановка/ST-режим).
+    //
+    // @Volatile: пишется из tick (главный поток), читается из updateProgress
+    // (тоже главный, через uiTicker), но явная видимость между тактами
+    // важна — иначе счётчик мог бы «залипнуть» на устаревшем значении.
+    // История: поле было добавлено в v25 (строка прогресса), убрано в v35
+    // (формат упрощён до «Клик N/M»), восстановлено в этом фиксе.
+    @Volatile private var nextActionAtMs = 0L
 
     // Recording
     private var recording = false
@@ -497,6 +512,69 @@ class ClickService : AccessibilityService() {
         val r = lastRecordResult
         lastRecordResult = null
         return r
+    }
+
+    /**
+     * ФИКС (v42, баг S2): геттер для последнего активного пресета службы.
+     * Служба хранит его в приватном поле lastPreset; SettingsActivity при
+     * удалении пресета из PresetStorage должен проверить, не является ли
+     * удалённый пресет активным в службе — и если да, очистить (иначе
+     * «призрак» удалённого пресета продолжает работать после play с
+     * плавающей панели).
+     */
+    fun getLastPreset(): Preset? = lastPreset
+
+    /**
+     * ФИКС (v42, баг S2): очистить lastPreset (и state-pref) — вызывается
+     * из SettingsActivity.confirmDelete, когда пользователь удаляет пресет,
+     * совпадающий с активным в службе. Без этого play с плавающей панели
+     * после удаления продолжал бы играть УДАЛЁННЫЙ пресет (он переживал в
+     * памяти службы + state-pref до перезапуска устройства).
+     *
+     * Безопасно вызывать во время playback — stopPlayback чистит оверлеи.
+     * Вызов вне playback — тоже безопасно (stopPlayback выйдет рано по
+     * !playing). Маркеры/крестик остаются как есть — после очистки их
+     * не для чего показывать, но скрывать не обязательно: пользователь
+     * увидит пустую панель при следующем открытии.
+     */
+    fun clearLastPreset() {
+        if (playing) stopPlayback()
+        lastPreset = null
+        // ФИКС (v42, S5): commit, не apply — синхронная запись, чтобы
+        // пользователь увидел пустую панель даже если сразу убьёт приложение
+        runCatching {
+            getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
+                .edit().remove(KEY_LAST_PRESET).commit()
+        }
+        updatePanelState()
+        updateBubbleIcon()
+    }
+
+    /**
+     * ФИКС (v42, баг S6): обновить lastPreset, если сохранённый пресет
+     * совпадает по (name, mode) с текущим активным. Без этого play с
+     * плавающей панели после правки пресета в редакторе играл бы СТАРУЮ
+     * версию — пользователь удивлялся, почему изменения «не применились».
+     *
+     * Возвращает true, если lastPreset был обновлён (совпал и заменён),
+     * false — если не совпал (тогда пользователь должен явно выбрать
+     * пресет через ☰ на плавающей панели).
+     *
+     * НЕ запускает playback, только подменяет пресет в памяти и state-pref.
+     * Если playback уже идёт — обновляет currentPreset (новые параметры
+     * применятся со следующего тика: задержка, координаты действий, и т.д.).
+     */
+    fun updateLastPresetIfMatches(preset: Preset): Boolean {
+        val lp = lastPreset ?: return false
+        if (lp.name != preset.name || lp.mode != preset.mode) return false
+        // Присваиваем новое значение — copy с updated fields
+        lastPreset = preset
+        if (playing) currentPreset = preset
+        persistLastPreset(preset)
+        // Если playing, строки панели (progress, tvPresetName) обновятся
+        // на следующем тике uiTicker'а — это нормально
+        updatePanelState()
+        return true
     }
 
     private fun overlayType(): Int =
@@ -781,10 +859,15 @@ class ClickService : AccessibilityService() {
      * ФИЧА (v25): строка прогресса MTWS на панели — на месте бывшей кнопки
      * паузы. ФОРМАТ (v35): «Клик 1/15» / «Свайп 3/15» — вид действия,
      * номер ТЕКУЩЕГО действия и всего записанных действий пресета.
-     * В playback это выполняемое сейчас действие (progressActionNo,
-     * обновляется тикером каждые 100 мс), в простое — ВЫБРАННОЕ
-     * перемоткой ◀/▶ (manualIndex; ничего не выбрано — первое действие).
-     * Обратный отсчёт до следующего действия убран (v35).
+     * В playback это выполняемое сейчас действие (progressActionNo),
+     * в простое — ВЫБРАННОЕ перемоткой ◀/▶ (manualIndex; ничего не
+     * выбрано — первое действие).
+     * ФИЧА (v43): во время playback к строке добавлен ОБРАТНЫЙ ОТСЧЁТ
+     * до следующего действия (плановый момент следующего действия ставит
+     * tick при планировании, тикер обновляет каждую секунду). В v35 отсчёт
+     * был убран — возвращён по просьбе. Формат: «мин:сек» —
+     * «Клик 3/15 · 01:05», тот же вид %02d:%02d, что у таймера сессии
+     * в шапке панели.
      * Для ST-пресетов строка скрыта целиком — её место занимает поле задержки
      */
     private fun updateProgress() {
@@ -798,8 +881,18 @@ class ClickService : AccessibilityService() {
         val idx = if (playing) progressActionNo.coerceIn(1, size) - 1
                   else manualIndex.coerceIn(0, size - 1)
         val kind = if (preset.actions[idx].type == "tap") "Клик" else "Свайп"
+        // ФИЧА (v43): обратный отсчёт до следующего действия. Формат «мин:сек» —
+        // минуты и секунды всегда двузначные, тот же вид %02d:%02d, что у
+        // таймера сессии в шапке панели. coerceAtLeast(0) — действие вот-вот
+        // начнётся, показываем 00:00, не отрицательное число
+        val s = if (playing && nextActionAtMs > 0L) {
+            val secs = ((nextActionAtMs - System.currentTimeMillis())
+                .coerceAtLeast(0L) / 1000L).toInt()
+            "$kind ${idx + 1}/$size · " + "%02d:%02d".format(secs / 60, secs % 60)
+        } else {
+            "$kind ${idx + 1}/$size"
+        }
         // ФИКС (v36): setText только при изменении текста
-        val s = "$kind ${idx + 1}/$size"
         if (s != lastProgressText) {
             lastProgressText = s
             pv.text = s
@@ -1980,6 +2073,10 @@ class ClickService : AccessibilityService() {
         // ФИЧА (v25/v27): строка прогресса до первого тика покажет действие,
         // с которого стартовали (1-based); при sIdx = 0 — как раньше («Клик 1/N»)
         progressActionNo = sIdx + 1
+        // ФИЧА (v43): сброс обратного отсчёта — настоящий момент следующего
+        // действия поставит первый tick, до него отсчёта нет (строка прогресса
+        // покажет «Клик N/M» без «· MM:SS»)
+        nextActionAtMs = 0L
         closeDelayEditor()
 
         // ФИЧА: нумерованные точки — touchable-оверлеи, на время playback
@@ -2034,6 +2131,10 @@ class ClickService : AccessibilityService() {
         // посмотрит на playing==false и не постит tick — но флаг
         // очистим явно, чтобы не было «висячего» true между сессиями
         pendingTick = false
+        // ФИЧА (v43): сброс обратного отсчёта — playback остановлен, никакого
+        // «следующего действия» нет, строка прогресса покажет финальное
+        // действие без «· MM:SS» (либо выбранную перемоткой позицию в простое)
+        nextActionAtMs = 0L
         // ФИЧА (v24): ручная навигация продолжает с места остановки — последним
         // выполненным считаем действие, на котором playback остановился.
         // После полного прогона цикла (actionIndex уже обнулился) — последнее
@@ -2289,11 +2390,19 @@ class ClickService : AccessibilityService() {
                     preset.actions[actionIndex - 1].delayMs
                 // ФИЧА (v25): строка прогресса — номер только что запущенного
                 // действия (actionIndex уже инкрементирован, т.е. 1-based).
-                // ФИКС (v36): nextActionAtMs удалён — мёртвое поле после v35
                 progressActionNo = actionIndex
+                // ФИЧА (v43): запоминаем плановый момент следующего действия —
+                // тикер рисует по нему обратный отсчёт «· MM:SS» в строке
+                // прогресса. Берём nextDelay (задержка после только что
+                // выполненного действия либо repeatIntervalMs в конце цикла),
+                // прижатый снизу к MIN_DELAY_MS — чтобы отсчёт всегда был
+                // неотрицательным. Системное время + задержка = момент
+                // запуска следующего tick'а, и именно до него считаем.
+                nextActionAtMs = System.currentTimeMillis() +
+                    nextDelay.coerceAtLeast(MIN_DELAY_MS)
                 // ФИКС (v38, перф): обновляем прогресс напрямую из tick —
-                // uiTicker теперь раз в секунду (см. фикс 2.6), и
-                // 250-мс polling больше не ловит смену действия вовремя
+                // мгновенно при смене действия. uiTicker потом доведёт
+                // отсчёт до актуальной секунды (см. фикс 2.6: 1-сек интервал)
                 updateProgress()
                 handler.postDelayed(this, nextDelay.coerceAtLeast(MIN_DELAY_MS))
             }
@@ -2793,10 +2902,21 @@ class ClickService : AccessibilityService() {
      */
     private fun persistLastPreset(preset: Preset) {
         runCatching {
+            // ФИКС (v42, баг S5): apply → commit. apply() асинхронно —
+            // правка (drag крестика/маркера, изменение задержки в редакторе
+            // панели) могла потеряться, если пользователь сразу убивал
+            // приложение (force-stop / OOM kill) до того, как фоновый
+            // writer успевал сработать. commit() синхронный — ждёт записи
+            // на диск, ~5-15 мс на современных флешках, незаметно.
+            //
+            // persistLastPreset зовётся редко (только на правки с плавающей
+            // панели), не на каждом тике — синхронная запись тут дёшево.
+            // Сравните с writeDraft в SettingsActivity — там тоже commit()
+            // для той же причины (пережить гибель процесса).
             getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_LAST_PRESET, preset.toJson().toString())
-                .apply()
+                .commit()
         }
     }
 

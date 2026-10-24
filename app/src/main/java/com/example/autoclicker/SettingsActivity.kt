@@ -418,6 +418,18 @@ class SettingsActivity : AppCompatActivity() {
             .setMessage(p.name)
             .setPositiveButton("Удалить") { _, _ ->
                 PresetStorage.delete(this, p.name, p.mode)
+                // ФИКС (v42, баг S2): если удалили пресет, который сейчас
+                // активен в службе (lastPreset по name+mode) — чистим,
+                // иначе призрак удалённого продолжил бы играть после play
+                // с плавающей панели, переживая в памяти + state-pref
+                // до перезапуска устройства
+                val svc = ClickService.instance
+                val lp = svc?.getLastPreset()
+                if (svc != null && lp != null &&
+                    lp.name == p.name && lp.mode == p.mode
+                ) {
+                    svc.clearLastPreset()
+                }
                 refreshPresets()
             }
             .setNegativeButton("Отмена", null)
@@ -511,6 +523,19 @@ class SettingsActivity : AppCompatActivity() {
             return null
         }
 
+        // ФИКС (v42, баг S3): ST-пресет без точки можно было сохранить —
+        // actions было emptyList() (если служба выключена или крестик
+        // скрыт). При playback tick для ST с empty actions падает в
+        // дефолтную точку crosshairCenterX/Y (140f, 540f — верхний-левый
+        // угол). Пользователь сохранял «пустой» пресет, играл его — клик
+        // шел в (140, 540), что вообще не то, что хотел. Теперь
+        // валидируем: ST обязан иметь ХОТЯ БЫ ОДИН тап
+        if (mode == "ST" && actions.isEmpty()) {
+            toast("Сначала выберите точку для тапа (кнопка «Выберите место для тапа») " +
+                  "или включите службу с прицелом")
+            return null
+        }
+
         return Preset(
             name = name,
             mode = mode,
@@ -527,6 +552,15 @@ class SettingsActivity : AppCompatActivity() {
     private fun savePreset() {
         val p = buildPreset() ?: return
         PresetStorage.save(this, p)
+        // ФИКС (v42, баг S6): если сохранённый пресет совпадает по (name,
+        // mode) с текущим активным в службе — пушим обновлённую версию.
+        // Без этого play с плавающей панели после правки в редакторе
+        // играл бы СТАРУЮ версию — пользователь удивлялся «почему мои
+        // изменения не применились». Альтернативно пользователь должен
+        // был открыть плавающую панель → ☰ → выбрать пресет из списка —
+        // неочевидно. updateLastPresetIfMatches пушит только при совпадении,
+        // иначе ничего не делает (пресет не был активным — оставляем как есть)
+        ClickService.instance?.updateLastPresetIfMatches(p)
         refreshPresets()
         // ФИКС (v18): черновик сохранённого пресета больше не нужен
         clearDraft()
@@ -877,18 +911,33 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     /** Коммитит задержки из полей ввода в recordedActions (перед сохранением/запуском).
-     *  Поля ищутся по тегам min/sec — привязка к позициям детей не нужна */
+     *  Поля ищутся по тегам min/sec — привязка к позициям детей не нужна.
+     *
+     *  ФИКС (v42, критичный баг N1): раньше использовался счётчик цикла `i`
+     *  как индекс в recordedActions. В insert mode llActions содержит
+     *  чередующиеся кнопки «+» (Button, не LinearLayout) и строки действий
+     *  (LinearLayout). `as? LinearLayout ?: continue` скипает + кнопки,
+     *  но i++ продолжает инкрементироваться — `recordedActions[i]` берёт
+     *  НЕ ТОТ элемент: задержка action 0 пишется в recordedActions[1],
+     *  action 1 → в recordedActions[2], и т.д. — перемешивание данных.
+     *
+     *  Теперь отдельный actionIdx, инкрементируется только для реальных
+     *  action-рядов. + кнопки скипаются через continue БЕЗ сдвига индекса
+     *  в recordedActions */
     private fun commitDelaysFromEditors() {
         if (mode != "MTWS") return
-        val n = minOf(llActions.childCount, recordedActions.size)
-        for (i in 0 until n) {
+        var actionIdx = 0   // отдельный счётчик action-рядов (не i из цикла)
+        for (i in 0 until llActions.childCount) {
             val row = llActions.getChildAt(i) as? LinearLayout ?: continue
+            if (actionIdx >= recordedActions.size) break
             val etMin = row.findViewWithTag<EditText>("min") ?: continue
             val etSec = row.findViewWithTag<EditText>("sec") ?: continue
             val min = etMin.text.toString().toLongOrNull() ?: 0L
             val sec = etSec.text.toString().toLongOrNull() ?: 0L
             val v = min * 60_000L + sec * 1000L
-            recordedActions[i] = recordedActions[i].copy(delayMs = v.coerceIn(0L, MAX_DELAY_MS))
+            recordedActions[actionIdx] = recordedActions[actionIdx]
+                .copy(delayMs = v.coerceIn(0L, MAX_DELAY_MS))
+            actionIdx++
         }
     }
 
