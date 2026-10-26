@@ -33,12 +33,22 @@ android {
     // подписана старым ключом — v19 придётся один раз поставить с
     // удалением старой (пресеты при удалении стираются, пересохраните
     // их параметры). Все СЛЕДУЮЩИЕ обновления пойдут поверх.
+    //
+    // ФИКС (v44 / ci): кейстор убран из git (commit a853c0d — security).
+    // Пароли читаются из env vars (см. .github/workflows/android.yml),
+    // с fallback на хардкод для локальных сборок. В CI воркфлоу decode'ит
+    // SIGNING_KEYSTORE_BASE64 в файл keystore/sekira.keystore и прокидывает
+    // SIGNING_KEYSTORE_PASSWORD/SIGNING_KEY_ALIAS/SIGNING_KEY_PASSWORD как
+    // env vars. Локально, если env vars не заданы — fallback на хардкод,
+    // но сам кейстор должен лежать в keystore/sekira.keystore на диске
+    // (можно восстановить из git history: git show ed463cd:keystore/sekira.keystore
+    // > keystore/sekira.keystore).
     signingConfigs {
         create("sekira") {
             storeFile = rootProject.file("keystore/sekira.keystore")
-            storePassword = "sekira2026"
-            keyAlias = "sekira"
-            keyPassword = "sekira2026"
+            storePassword = System.getenv("SIGNING_KEYSTORE_PASSWORD") ?: "sekira2026"
+            keyAlias = System.getenv("SIGNING_KEY_ALIAS") ?: "sekira"
+            keyPassword = System.getenv("SIGNING_KEY_PASSWORD") ?: "sekira2026"
         }
     }
 

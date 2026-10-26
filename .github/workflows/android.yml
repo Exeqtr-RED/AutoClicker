@@ -68,7 +68,32 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
+      # ФИКС (v44 / ci): кейстор не в git (commit a853c0d убрал из репо).
+      # Decode'им его из GitHub Actions Secret SIGNING_KEYSTORE_BASE64
+      # (base64-кодированный бинарник, добавляется через
+      # Settings → Secrets and variables → Actions → New repository secret).
+      # Файл кладётся в keystore/sekira.keystore — туда же, куда ссылается
+      # signingConfig в app/build.gradle.kts.
+      - name: Decode keystore from secret
+        run: |
+          mkdir -p keystore
+          echo "${{ secrets.SIGNING_KEYSTORE_BASE64 }}" | base64 -d > keystore/sekira.keystore
+          # Проверка что файл реально создан и не пустой — иначе сборка
+          # упадёт с невнятной ошибкой validateSigningDebug (как было раньше)
+          if [ ! -s keystore/sekira.keystore ]; then
+            echo "ERROR: keystore/sekira.keystore is empty or missing"
+            echo "Check that SIGNING_KEYSTORE_BASE64 secret is set in repo settings"
+            exit 1
+          fi
+          ls -la keystore/sekira.keystore
+
       - name: Build debug and release APKs
+        env:
+          # Пароли к кейстору тоже из секретов — в открытом виде в build.gradle.kts
+          # только fallback для локальных сборок. В CI env vars перебивают хардкод
+          SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon assembleDebug assembleRelease
