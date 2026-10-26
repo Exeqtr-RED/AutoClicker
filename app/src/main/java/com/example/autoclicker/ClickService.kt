@@ -13,8 +13,12 @@ import android.text.InputType
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-// ФИКС (v36): импорт SystemClock и поле nextActionAtMs удалены — после v35
-// (убран обратный отсчёт) поле оставалось мёртвым: записывалось, но не читалось
+// ФИКС (v44, устаревший комментарий): ниже шла заметка про v36, что импорт
+// SystemClock и поле nextActionAtMs удалены как мёртвые. Это была правда для
+// v36 — НО в v43 поле nextActionAtMs ВОССТАНОВЛЕНО, updateProgress рисует по
+// нему обратный отсчёт «· MM:SS» до следующего действия (System.currentTimeMillis
+// вместо SystemClock — поэтому импорт SystemClock не вернулся). Старый
+// комментарий удалял, чтобы не вводить в заблуждение.
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -215,9 +219,13 @@ class ClickService : AccessibilityService() {
     private var bubbleIcon: ImageView? = null
 
     // ФИЧА (v25): прогресс MTWS для строки на панели — номер (1-based)
-    // последнего запущенного действия. Пауза удалена (v25), обратный отсчёт
-    // удалён (v35); ФИКС (v36): поле nextActionAtMs удалено как мёртвое —
-    // после v35 оно только записывалось, но нигде не читалось
+    // последнего запущенного действия.
+    // ФИКС (v44, устаревший комментарий): ниже шла заметка «поле nextActionAtMs
+    // удалено как мёртвое — после v35 оно только записывалось, но нигде не
+    // читалось». Это было правдой для версии v36 — поле убрали. НО в v43
+    // (по просьбе пользователя) поле nextActionAtMs ВОССТАНОВЛЕНО, updateProgress
+    // рисует по нему обратный отсчёт «· MM:SS» до следующего действия. Старый
+    // комментарий активно вводил в заблуждение — удалён.
     private var progressActionNo = 0
 
     // ФИКС (v36, батарея): кэш последних текстов тикера — setText
@@ -234,7 +242,20 @@ class ClickService : AccessibilityService() {
     // перенумеруется в in-place refresh без re-inflate), params хранится
     // здесь же — refreshMtwsMarkers обновляет позицию маркера через
     // тот же объект LayoutParams, что и touch-listener, без приведения типов
-    private class MtwsMarker(val view: View, var index: Int, val params: WindowManager.LayoutParams)
+    // ФИКС (v44, утечка handler-runnable): pendingLong хранится на маркере,
+    // а не в локальном поле touch-listener. Раньше поле было локально в
+    // anonymous OnTouchListener — touch-listener привязан к view, и при
+    // удалении view через hideMtwsMarkers pendingLong оставался в очереди
+    // handler'а до срабатывания (600 мс) или до onDestroy. Хотя сам
+    // runnable проверяет mtwsMarkers.any { it.view === captured } и
+    // выходит рано — висит в очереди бесполезно. Теперь поле на маркере,
+    // hideMtwsMarkers явно снимает его через handler.removeCallbacks.
+    private class MtwsMarker(
+        val view: View,
+        var index: Int,
+        val params: WindowManager.LayoutParams,
+        var pendingLong: Runnable? = null
+    )
     private val mtwsMarkers = mutableListOf<MtwsMarker>()
 
     // Оверлеи
@@ -276,17 +297,20 @@ class ClickService : AccessibilityService() {
     // многочасовом playback. Тикер безопасен при свёрнутой панели:
     // updateCounter()/updateProgress() просто выходят, если панель не показана
     // ФИКС (v38, перф, батарея): интервал 250 мс → 1000 мс. Тикер
-    // обновляет секундный таймер (естественная 1-секундная гранулярность)
-    // и раньше обновлял прогресс MTWS — теперь прогресс зовётся напрямую
-    // из tick после progressActionNo = actionIndex (мгновенно при смене
-    // действия). updateCounter/updateProgress с кэшем lastCounterText/
-    // lastProgressText пропускают одинаковые setText — но сами пробуждения
-    // хендлера 4 раза в секунду на многочасовом playback всё равно
-    // будили CPU. 1 раз в секунду — достаточно для таймера.
+    // обновляет секундный таймер (естественная 1-секундная гранулярность).
+    // updateCounter с кэшем lastCounterText пропускает одинаковые setText —
+    // но сами пробуждения хендлера 4 раза в секунду на многочасовом playback
+    // всё равно будили CPU. 1 раз в секунду — достаточно.
+    //
+    // ФИЧА (v43): вернули updateProgress в тикер — он теперь тоже рисует
+    // обратный отсчёт «· MM:SS» до следующего действия. 1-сек интервал
+    // достаточен: отсчёт показывает минуты:секунды, ниже 1 секунды
+    // granularity не нужна. Кэш lastProgressText пропускает одинаковые
+    // setText — в ST-режиме или простое вызов дёшев (ранний return).
     private val uiTicker = object : Runnable {
         override fun run() {
             updateCounter()
-            // updateProgress убран — зовётся из tick при смене действия
+            updateProgress()
             if (playing) handler.postDelayed(this, 1000L)
         }
     }
@@ -328,6 +352,18 @@ class ClickService : AccessibilityService() {
     // потока (tick — главный, gestureCallback.post — главный), но
     // @Volatile для ясности и на случай будущих изменений
     @Volatile private var pendingTick = false
+
+    // ФИЧА (v43): плановый момент СЛЕДУЮЩЕГО действия (System.currentTimeMillis()
+    // + postDelayed, ставит tick при планировании) — по нему тикер панели
+    // рисует обратный отсчёт в строке прогресса MTWS. Формат: «мин:сек» —
+    // «Клик 3/15 · 01:05». 0 = отсчёта нет (простой/остановка/ST-режим).
+    //
+    // @Volatile: пишется из tick (главный поток), читается из updateProgress
+    // (тоже главный, через uiTicker), но явная видимость между тактами
+    // важна — иначе счётчик мог бы «залипнуть» на устаревшем значении.
+    // История: поле было добавлено в v25 (строка прогресса), убрано в v35
+    // (формат упрощён до «Клик N/M»), восстановлено в этом фиксе.
+    @Volatile private var nextActionAtMs = 0L
 
     // Recording
     private var recording = false
@@ -458,6 +494,29 @@ class ClickService : AccessibilityService() {
         tvProgress = null
         lastCounterText = null
         lastProgressText = null
+        // ФИКС (v44, гигиена): симметрия с collapseToBubble / closeAllOverlays.
+        // Раньше в onDestroy не занулялись View-ссылки, держимые полем панели
+        // (toggleBtn, tvCounter, tvPresetName, tvDelayValue, prevBtnRef,
+        // nextBtnRef, presetsBtnRef, crosshairBtnRef) — после уничтожения
+        // службы они оставались в памяти до GC, потенциально удерживая
+        // контексты. mtwsMarkers / recordedActions / currentPreset — тоже
+        // нечищеные ссылки. Теперь все явно занулятся, симметрично с
+        // collapseToBubble() и closeAllOverlays().
+        toggleBtn = null
+        tvCounter = null
+        tvPresetName = null
+        tvDelayValue = null
+        prevBtnRef = null
+        nextBtnRef = null
+        presetsBtnRef = null
+        crosshairBtnRef = null
+        crosshairParams = null
+        // mtwsMarkers уже очищены через hideMtwsMarkers() выше, но на всякий
+        // случай — если hideMtwsMarkers не вызвалась (wm не инициализирован),
+        // список может остаться непустым
+        mtwsMarkers.clear()
+        recordedActions = mutableListOf()
+        currentPreset = null
         // ФИКС (v38, перф): освобождаем кеш Vibrator — при следующем
         // onServiceConnected он пересоздастся (не обязательно, но
         // симметрично с другими полями)
@@ -844,10 +903,15 @@ class ClickService : AccessibilityService() {
      * ФИЧА (v25): строка прогресса MTWS на панели — на месте бывшей кнопки
      * паузы. ФОРМАТ (v35): «Клик 1/15» / «Свайп 3/15» — вид действия,
      * номер ТЕКУЩЕГО действия и всего записанных действий пресета.
-     * В playback это выполняемое сейчас действие (progressActionNo,
-     * обновляется тикером каждые 100 мс), в простое — ВЫБРАННОЕ
-     * перемоткой ◀/▶ (manualIndex; ничего не выбрано — первое действие).
-     * Обратный отсчёт до следующего действия убран (v35).
+     * В playback это выполняемое сейчас действие (progressActionNo),
+     * в простое — ВЫБРАННОЕ перемоткой ◀/▶ (manualIndex; ничего не
+     * выбрано — первое действие).
+     * ФИЧА (v43): во время playback к строке добавлен ОБРАТНЫЙ ОТСЧЁТ
+     * до следующего действия (плановый момент следующего действия ставит
+     * tick при планировании, тикер обновляет каждую секунду). В v35 отсчёт
+     * был убран — возвращён по просьбе. Формат: «мин:сек» —
+     * «Клик 3/15 · 01:05», тот же вид %02d:%02d, что у таймера сессии
+     * в шапке панели.
      * Для ST-пресетов строка скрыта целиком — её место занимает поле задержки
      */
     private fun updateProgress() {
@@ -861,8 +925,18 @@ class ClickService : AccessibilityService() {
         val idx = if (playing) progressActionNo.coerceIn(1, size) - 1
                   else manualIndex.coerceIn(0, size - 1)
         val kind = if (preset.actions[idx].type == "tap") "Клик" else "Свайп"
+        // ФИЧА (v43): обратный отсчёт до следующего действия. Формат «мин:сек» —
+        // минуты и секунды всегда двузначные, тот же вид %02d:%02d, что у
+        // таймера сессии в шапке панели. coerceAtLeast(0) — действие вот-вот
+        // начнётся, показываем 00:00, не отрицательное число
+        val s = if (playing && nextActionAtMs > 0L) {
+            val secs = ((nextActionAtMs - System.currentTimeMillis())
+                .coerceAtLeast(0L) / 1000L).toInt()
+            "$kind ${idx + 1}/$size · " + "%02d:%02d".format(secs / 60, secs % 60)
+        } else {
+            "$kind ${idx + 1}/$size"
+        }
         // ФИКС (v36): setText только при изменении текста
-        val s = "$kind ${idx + 1}/$size"
         if (s != lastProgressText) {
             lastProgressText = s
             pv.text = s
@@ -1752,7 +1826,19 @@ class ClickService : AccessibilityService() {
         if (mtwsMarkers.isEmpty()) return
         val copy = mtwsMarkers.toList()
         mtwsMarkers.clear()
-        copy.forEach { m -> runCatching { wm.removeView(m.view) } }
+        copy.forEach { m ->
+            // ФИКС (v44): снимаем отложенный long-tap с handler, чтобы
+            // он не висел в очереди после removeView. Сам runnable
+            // проверил бы mtwsMarkers.any { it.view === captured }
+            // (теперь пусто) и вышел рано — но очередь держит его живым
+            // ~600 мс бесполезно, а в onDestroy это критичнее —
+            // там removeCallbacksAndMessages(null) всё чистит, но
+            // при перестроении маркеров без уничтожения службы
+            // утечка накапливалась
+            m.pendingLong?.let { handler.removeCallbacks(it) }
+            m.pendingLong = null
+            runCatching { wm.removeView(m.view) }
+        }
     }
 
     private fun addMtwsMarker(index: Int, x: Float, y: Float) {
@@ -1790,7 +1876,10 @@ class ClickService : AccessibilityService() {
             var sx = 0; var sy = 0; var tx = 0f; var ty = 0f
             var moved = false
             var longFired = false
-            var pendingLong: Runnable? = null
+            // ФИКС (v44): pendingLong хранится на marker (внешняя переменная),
+            // а не в локальном поле — чтобы hideMtwsMarkers могла снять его
+            // с handler. Локальное поле тут не нужно — все чтения/записи
+            // идут через marker.pendingLong
 
             override fun onTouch(view: View, e: MotionEvent): Boolean {
                 when (e.action) {
@@ -1800,13 +1889,13 @@ class ClickService : AccessibilityService() {
                         moved = false
                         longFired = false
                         val captured = view
-                        pendingLong = Runnable {
+                        marker.pendingLong = Runnable {
                             if (!moved && !longFired && mtwsMarkers.any { it.view === captured }) {
                                 longFired = true
                                 removeMtwsPoint(captured)
                             }
                         }
-                        handler.postDelayed(pendingLong!!, 600L)
+                        marker.pendingLong?.let { handler.postDelayed(it, 600L) }
                         return true
                     }
                     MotionEvent.ACTION_MOVE -> {
@@ -1814,7 +1903,7 @@ class ClickService : AccessibilityService() {
                         val dy = e.rawY - ty
                         if (!moved && (Math.abs(dx) > slop || Math.abs(dy) > slop)) {
                             moved = true
-                            pendingLong?.let { handler.removeCallbacks(it) }
+                            marker.pendingLong?.let { handler.removeCallbacks(it) }
                         }
                         if (moved) {
                             p.x = sx + dx.toInt()
@@ -1824,7 +1913,8 @@ class ClickService : AccessibilityService() {
                         return true
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        pendingLong?.let { handler.removeCallbacks(it) }
+                        marker.pendingLong?.let { handler.removeCallbacks(it) }
+                        marker.pendingLong = null
                         if (moved) saveMarkerPosition(view, p)
                         return true
                     }
@@ -2025,8 +2115,9 @@ class ClickService : AccessibilityService() {
         cycleCount = 0
         startTimeMs = System.currentTimeMillis()
         // ФИКС (v29): «промывка» диспетчера — застрявший в очереди прошивки
-        // штрих прошлой сессии отменяется новым dispatchGesture
-        cancelStaleGesture()
+        // ФИКС (v44, баг 2): cancelStaleGesture() удалён — был фантомным
+        // тапом в угол экрана и не отменял ничего реально. Состояние
+        // сбрасываем явным присваиванием.
         gestureInFlight = false
         consecutiveCancels = 0
         // ФИКС (v38, перф): сброс pendingTick — мог остаться от прошлой
@@ -2043,6 +2134,10 @@ class ClickService : AccessibilityService() {
         // ФИЧА (v25/v27): строка прогресса до первого тика покажет действие,
         // с которого стартовали (1-based); при sIdx = 0 — как раньше («Клик 1/N»)
         progressActionNo = sIdx + 1
+        // ФИЧА (v43): сброс обратного отсчёта — настоящий момент следующего
+        // действия поставит первый tick, до него отсчёта нет (строка прогресса
+        // покажет «Клик N/M» без «· MM:SS»)
+        nextActionAtMs = 0L
         closeDelayEditor()
 
         // ФИЧА: нумерованные точки — touchable-оверлеи, на время playback
@@ -2089,14 +2184,19 @@ class ClickService : AccessibilityService() {
         // СЛЕДУЮЩЕМ касании — тап доигрывается в точке пресета уже после
         // остановки. removeCallbacks снимает только наши колбэки —
         // застрявшему в очереди СИСТЕМЫ штриху он не указ. Новый
-        // dispatchGesture по контракту отменяет текущие жесты сервиса
-        cancelStaleGesture()
+        // ФИКС (v44, баг 2): cancelStaleGesture() удалён — был фантомным
+        // тапом в угол экрана и не отменял ничего реально. Состояние
+        // сбрасываем явным присваиванием.
         gestureInFlight = false
         // ФИКС (v38, перф): сброс pendingTick — мог быть выставлен tick'ом
         // перед самым stopPlayback. Даже если оставить, gestureCallback
         // посмотрит на playing==false и не постит tick — но флаг
         // очистим явно, чтобы не было «висячего» true между сессиями
         pendingTick = false
+        // ФИЧА (v43): сброс обратного отсчёта — playback остановлен, никакого
+        // «следующего действия» нет, строка прогресса покажет финальное
+        // действие без «· MM:SS» (либо выбранную перемоткой позицию в простое)
+        nextActionAtMs = 0L
         // ФИЧА (v24): ручная навигация продолжает с места остановки — последним
         // выполненным считаем действие, на котором playback остановился.
         // После полного прогона цикла (actionIndex уже обнулился) — последнее
@@ -2173,28 +2273,22 @@ class ClickService : AccessibilityService() {
         screenOnOverlay = null
     }
 
-    /** ФИКС (v29): «промывка» диспетчера жестов. Диспатчится безобидный
-     *  1-мс штрих в углу экрана (1,1)->(2,2): по контракту dispatchGesture
-     *  система отменяет все текущие жесты ЭТОГО сервиса, включая штрих,
-     *  застрявший в очереди ввода. Отдельный колбэк БЕЗ счётчиков:
-     *  отменённый/завершённый flush не должен попадать в clickCount
-     *  и не должен накручивать consecutiveCancels (иначе возможны
-     *  ложные «Жесты блокируются») */
-    private val flushCallback = object : GestureResultCallback() {}
-
-    private fun cancelStaleGesture() {
-        if (!gestureInFlight) return
-        val path = Path().apply { moveTo(1f, 1f); lineTo(2f, 2f) }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, 1L)
-        val g = GestureDescription.Builder().addStroke(stroke).build()
-        val ok = runCatching { dispatchGesture(g, flushCallback, null) }
-            .getOrElse { e ->
-                Log.e(TAG, "dispatchGesture(flush) error", e)
-                false
-            }
-        dbg { "cancelStaleGesture ok=$ok" }
-        gestureInFlight = false
-    }
+    // ФИКС (v44, баг 2): cancelStaleGesture() + flushCallback удалены.
+    // Раньше диспатчили «промывочный» 1-мс штрих в точку (1,1)->(2,2) —
+    // левый верхний угол экрана, область статус-бара. По контракту
+    // dispatchGesture отменяет текущие жесты сервиса — но:
+    //   1) это РЕАЛЬНЫЙ инжект касания в точку (1,1). На части прошивок
+    //      тап туда что-то triggeрит — шторка уведомлений, часы,
+    //      горячая зона системы. Каждый старт/стоп кликера давал
+    //      фантомное касание в угол экрана.
+    //   2) и без того бесполезно: dispatchGesture ставит жест в очередь
+    //      ПОСЛЕ протухшего, а состояние и так сброшено строкой
+    //      gestureInFlight = false в вызывающем коде. Поздний
+    //      onCompleted протухшего жеста безвреден — pendingTick уже
+    //      сброшен в stopPlayback, а в startPlayback новый tick
+    //      поставит новое значение.
+    // Вместо cancelStaleGesture() — просто gestureInFlight = false
+    // (см. startPlayback / stopPlayback).
 
     private val gestureCallback = object : GestureResultCallback() {
         override fun onCompleted(g: GestureDescription?) {
@@ -2352,11 +2446,19 @@ class ClickService : AccessibilityService() {
                     preset.actions[actionIndex - 1].delayMs
                 // ФИЧА (v25): строка прогресса — номер только что запущенного
                 // действия (actionIndex уже инкрементирован, т.е. 1-based).
-                // ФИКС (v36): nextActionAtMs удалён — мёртвое поле после v35
                 progressActionNo = actionIndex
+                // ФИЧА (v43): запоминаем плановый момент следующего действия —
+                // тикер рисует по нему обратный отсчёт «· MM:SS» в строке
+                // прогресса. Берём nextDelay (задержка после только что
+                // выполненного действия либо repeatIntervalMs в конце цикла),
+                // прижатый снизу к MIN_DELAY_MS — чтобы отсчёт всегда был
+                // неотрицательным. Системное время + задержка = момент
+                // запуска следующего tick'а, и именно до него считаем.
+                nextActionAtMs = System.currentTimeMillis() +
+                    nextDelay.coerceAtLeast(MIN_DELAY_MS)
                 // ФИКС (v38, перф): обновляем прогресс напрямую из tick —
-                // uiTicker теперь раз в секунду (см. фикс 2.6), и
-                // 250-мс polling больше не ловит смену действия вовремя
+                // мгновенно при смене действия. uiTicker потом доведёт
+                // отсчёт до актуальной секунды (см. фикс 2.6: 1-сек интервал)
                 updateProgress()
                 handler.postDelayed(this, nextDelay.coerceAtLeast(MIN_DELAY_MS))
             }
@@ -2435,7 +2537,7 @@ class ClickService : AccessibilityService() {
         lastRecordResult = null
         // ФИКС (v38, OOM): сброс флага потолка при старте новой сессии —
         // даже если предыдущая завершилась не через stopRecordingInternal
-        // (например,.onDestroy службы)
+        // (например, через onDestroy службы)
         recordingFullNotified = false
         // ФИЧА: новая сессия записи начинается без хвостов предпросмотра
         handler.removeCallbacks(replayRunnable)
@@ -2649,10 +2751,54 @@ class ClickService : AccessibilityService() {
                     val dt = System.currentTimeMillis() - downTime
                     val dx = upX - downX; val dy = upY - downY
                     val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+                    val now = System.currentTimeMillis()
+                    // ФИКС (v23): порог «тап или свайп» — в DP (SWIPE_THRESHOLD_DP),
+                    // а не в сырых пикселях: 40 px на 3x-экране это всего ~13dp
+                    val swipeThresholdPx = SWIPE_THRESHOLD_DP * resources.displayMetrics.density
+                    val action = if (dist < swipeThresholdPx) {
+                        PresetAction("tap", downX.toInt(), downY.toInt(), 0, 0, 0L, delayMs = 0L)
+                    } else {
+                        PresetAction("swipe",
+                            downX.toInt(), downY.toInt(),
+                            upX.toInt(), upY.toInt(),
+                            dt.coerceIn(50L, 5000L), delayMs = 0L)
+                    }
+                    // ФИЧА (v39): single-action режим — записали одно действие,
+                    // дальше не идём. recordedActions не трогаем (это для
+                    // обычной многошаговой записи), live replay не запускаем
+                    // (одно действие — пользователь увидит результат в редакторе
+                    // после возврата; предпросмотр тут избыточен и мешал бы
+                    // быстрому возврату окна). Автостат и колбэк с действием.
+                    //
+                    // ФИКС (v44, баг 1 — КРИТИЧНО): ветка ПЕРЕНОСИТСЯ ВВЕРХ,
+                    // ПЕРЕД проверкой MAX_RECORDED_ACTIONS и ПЕРЕД правкой
+                    // gap-задержки последнего действия. Раньше порядок был
+                    // обратный — из-за чего:
+                    //   1) после обычной записи, достигшей 5000 действий,
+                    //      single-action вставка блокировалась НАВСЕГДА
+                    //      (каждый тап давал тост «Достигнут максимум»),
+                    //      т.к. recordedActions не чистится ни
+                    //      startSingleActionRecording, ни stopRecordingInternal
+                    //      (это сделано сознательно — caller управляет своим
+                    //      списком, не нашим)
+                    //   2) в single-action режиме молча перезаписывался
+                    //      delayMs последнего действия списка прошлой сессии —
+                    //      gap между прошлой записью и текущим тапом
+                    //      становился новой задержкой для несвязанного с этим
+                    //      действием. Затирание чужих данных.
+                    // Теперь single-action идёт первым: captured action
+                    // формируется (он не зависит от recordedActions), и сразу
+                    // отдаётся в stopSingleActionRecording. Ни потолок, ни gap
+                    // не проверяются — они для обычной многошаговой записи.
+                    if (singleActionCb != null) {
+                        stopSingleActionRecording(action, bringBackEditor = true)
+                        return@setOnTouchListener true
+                    }
                     // ФИЧА: реальная пауза между действиями записывается как задержка
                     // ПРЕДЫДУЩЕГО действия (потом её можно отредактировать в
                     // настройках). Новое действие добавляется с задержкой 0
-                    val now = System.currentTimeMillis()
+                    // (только для обычной многошаговой записи — single-action
+                    // уже вышел выше)
                     // ФИКС (v38, OOM): потолок записанных действий. Без него
                     // многочасовая запись переполняла бы память. Тост один
                     // раз (recordingFullNotified), потом тихо игнорим —
@@ -2674,32 +2820,11 @@ class ClickService : AccessibilityService() {
                         recordedActions[li] = recordedActions[li].copy(delayMs = gap)
                     }
                     lastRecTime = now
-                    // ФИКС (v23): порог «тап или свайп» — в DP (SWIPE_THRESHOLD_DP),
-                    // а не в сырых пикселях: 40 px на 3x-экране это всего ~13dp
-                    val swipeThresholdPx = SWIPE_THRESHOLD_DP * resources.displayMetrics.density
-                    val action = if (dist < swipeThresholdPx) {
-                        PresetAction("tap", downX.toInt(), downY.toInt(), 0, 0, 0L, delayMs = 0L)
-                    } else {
-                        PresetAction("swipe",
-                            downX.toInt(), downY.toInt(),
-                            upX.toInt(), upY.toInt(),
-                            dt.coerceIn(50L, 5000L), delayMs = 0L)
-                    }
-                    // ФИЧА (v39): single-action режим — записали одно действие,
-                    // дальше не идём. recordedActions не трогаем (это для
-                    // обычной многошаговой записи), live replay не запускаем
-                    // (одно действие — пользователь увидит результат в редакторе
-                    // после возврата; предпросмотр тут избыточен и мешал бы
-                    // быстрому возврату окна). Автостат и колбэк с действием.
-                    if (singleActionCb != null) {
-                        stopSingleActionRecording(action, bringBackEditor = true)
-                        return@setOnTouchListener true
-                    }
                     recordedActions.add(action)
                     // ФИЧА (v23): счётчик на оверлее записи — сразу видно прогресс
                     updateRecCountOverlay()
                     // ФИЧА: живой предпросмотр — жест тут же выполняется на экране
-                    scheduleLiveReplay(action)
+                    scheduleLiveReplay()
                     true
                 }
                 else -> true
@@ -2767,7 +2892,11 @@ class ClickService : AccessibilityService() {
      * setRecordAreaTouchable — состояние записи остаётся консистентным
      * (оверлей остаётся touchable, обычная запись продолжает работать).
      */
-    private fun scheduleLiveReplay(a: PresetAction) {
+    // ФИКС (v44, мёртвый код): параметр `a: PresetAction` убран — тело
+    // функции его не использовало, dispatchLiveReplay берёт последнее
+    // действие из recordedActions.lastOrNull(). Был артефakt старой версии,
+    // когда replay брал координаты из параметра.
+    private fun scheduleLiveReplay() {
         if (Build.VERSION.SDK_INT < 28) return
         if (replayInFlight) return // не наслаивать предпросмотры друг на друга
         replayInFlight = true
