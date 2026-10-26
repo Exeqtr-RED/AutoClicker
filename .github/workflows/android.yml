@@ -77,7 +77,7 @@ jobs:
       - name: Decode keystore from secret
         run: |
           mkdir -p keystore
-          echo "${{ secrets.SIGNING_KEYSTORE_BASE64 }}" | base64 -d > keystore/sekira.keystore
+          echo "${{ secrets.SIGNING_KEYSTORE_BASE64 }}" | tr -d ' \t\r\n' | base64 -d > keystore/sekira.keystore
           # Проверка что файл реально создан и не пустой — иначе сборка
           # упадёт с невнятной ошибкой validateSigningDebug (как было раньше)
           if [ ! -s keystore/sekira.keystore ]; then
