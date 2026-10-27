@@ -31,9 +31,12 @@ data class PresetAction(
          * задержка старого пресета, и ритм воспроизведения не меняется.
          */
         fun fromJson(o: JSONObject, fallbackDelayMs: Long = 100L) = PresetAction(
-            o.getString("type"),
-            o.getInt("x1"), o.getInt("y1"),
-            o.getInt("x2"), o.getInt("y2"),
+            // ФИКС: optXxx вместо getXxx — битое/слишком старое действие раньше
+            // бросало исключение, per-item runCatching в PresetStorage ТУШИЛ
+            // ВЕСЬ пресет: он молча исчезал из списка пользователя
+            o.optString("type", "tap"),
+            o.optInt("x1"), o.optInt("y1"),
+            o.optInt("x2"), o.optInt("y2"),
             o.optLong("swipeDurationMs", 300L),
             o.optLong("delayMs", fallbackDelayMs)
         )
@@ -79,10 +82,13 @@ data class Preset(
             for (i in 0 until arr.length()) {
                 list.add(PresetAction.fromJson(arr.getJSONObject(i), legacyDelay))
             }
+            // ФИКС: optString для name/mode/timingMode — битое/чужое пресет
+            // раньше бросал исключение и ТУШИЛ ВЕСЬ список пресетов
+            // (per-item runCatching в getAll его пропускает, но лучше явно)
             return Preset(
-                o.getString("name"),
-                o.getString("mode"),
-                o.getString("timingMode"),
+                o.optString("name", ""),
+                o.optString("mode", "ST"),
+                o.optString("timingMode", "INFINITE"),
                 o.optLong("durationSec", 0L),
                 o.optInt("cycles", 1),
                 legacyDelay,

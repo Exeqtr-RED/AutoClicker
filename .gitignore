@@ -1,23 +1,21 @@
 ﻿*.iml
 .gradle
 /local.properties
-/.idea/
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
+.idea/
 .DS_Store
 /build
 /captures
 .externalNativeBuild
 .cxx
 local.properties
-# Р¤РРљРЎ (v31): СЃР±РѕСЂРѕС‡РЅС‹Рµ Р°СЂС‚РµС„Р°РєС‚С‹ РЅРµ С…СЂР°РЅСЏС‚СЃСЏ РІ git вЂ”
-# APK РїСѓР±Р»РёРєСѓРµС‚СЃСЏ РІ Releases, Р° РЅРµ РєРѕРјРјРёС‚РёС‚СЃСЏ РІ СЂРµРїРѕР·РёС‚РѕСЂРёР№
+
+# ФИКС (v31): сборочные артефакты не хранятся в git —
+# APK публикуется в Releases, а не коммитится в репозиторий
 dist/
 app/release/
 
-# ФИКС (v44): keystore через GitHub Actions Secret, в git не хранится
+# ФИКС (безопасность): keystore и пароли подписи не хранятся в репозитории
 keystore/
+*.keystore
+*.jks
+keystore.properties

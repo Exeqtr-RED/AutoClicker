@@ -31,9 +31,12 @@
 # отладочным ключом, который У КАЖДОЙ машины СВОЙ, из-за чего APK из
 # Actions не вставал поверх локально собранного. Теперь подпись везде
 # одинаковая: обновления ставятся поверх без удаления.
-# ВНИМАНИЕ (одноразово): версия, установленная ДО v19, подписана старым
-# ключом — первый апдейт на v19 требует удаления старой версии (пресеты
-# при этом сотрутся — пересохраните их параметры).
+#
+# ФИКС (безопасность): keystore больше не лежит в репозитории. CI
+# декодирует его из секрета SEKIRA_KEYSTORE_B64 (base64), пароль берётся
+# из секретов SEKIRA_STORE_PASSWORD / SEKIRA_KEY_ALIAS / SEKIRA_KEY_PASSWORD
+# (Settings -> Secrets and variables -> Actions). Старый ключ
+# скомпрометирован (пароль был в истории git) — используйте НОВЫЙ keystore.
 
 name: Android CI
 
@@ -68,32 +71,26 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
-      # ФИКС (v44 / ci): кейстор не в git (commit a853c0d убрал из репо).
-      # Decode'им его из GitHub Actions Secret SIGNING_KEYSTORE_BASE64
-      # (base64-кодированный бинарник, добавляется через
-      # Settings → Secrets and variables → Actions → New repository secret).
-      # Файл кладётся в keystore/sekira.keystore — туда же, куда ссылается
-      # signingConfig в app/build.gradle.kts.
-      - name: Decode keystore from secret
+      # ФИКС (безопасность): кейстор не в git. CI декодирует его из
+      # секрета SEKIRA_KEYSTORE_B64 (base64). Если секрет не задан —
+      # сборка продолжает с отладочным ключом раннера (полезно для PR
+      # из форков, где секреты недоступны).
+      - name: Decode signing keystore
+        env:
+          SEKIRA_KEYSTORE_B64: ${{ secrets.SEKIRA_KEYSTORE_B64 }}
         run: |
-          mkdir -p keystore
-          echo "${{ secrets.SIGNING_KEYSTORE_BASE64 }}" | tr -cd 'A-Za-z0-9+/=' | base64 -d > keystore/sekira.keystore
-          # Проверка что файл реально создан и не пустой — иначе сборка
-          # упадёт с невнятной ошибкой validateSigningDebug (как было раньше)
-          if [ ! -s keystore/sekira.keystore ]; then
-            echo "ERROR: keystore/sekira.keystore is empty or missing"
-            echo "Check that SIGNING_KEYSTORE_BASE64 secret is set in repo settings"
-            exit 1
+          if [ -n "$SEKIRA_KEYSTORE_B64" ]; then
+            mkdir -p keystore
+            echo "$SEKIRA_KEYSTORE_B64" | base64 -d > keystore/sekira.keystore
+          else
+            echo ">>> [Sekira] ВНИМАНИЕ: секрет SEKIRA_KEYSTORE_B64 не задан — подпись будет отладочной"
           fi
-          ls -la keystore/sekira.keystore
 
       - name: Build debug and release APKs
         env:
-          # Пароли к кейстору тоже из секретов — в открытом виде в build.gradle.kts
-          # только fallback для локальных сборок. В CI env vars перебивают хардкод
-          SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
-          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          SEKIRA_STORE_PASSWORD: ${{ secrets.SEKIRA_STORE_PASSWORD }}
+          SEKIRA_KEY_ALIAS: ${{ secrets.SEKIRA_KEY_ALIAS }}
+          SEKIRA_KEY_PASSWORD: ${{ secrets.SEKIRA_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon assembleDebug assembleRelease

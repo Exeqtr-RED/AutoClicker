@@ -2,6 +2,30 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+// ФИКС (безопасность): keystore и пароли ВЫНЕСЕНЫ из репозитория.
+// Раньше keystore/sekira.keystore и пароль лежали в git в открытом виде —
+// любой мог подписать APK этим ключом и подсунуть обновление поверх
+// установленного приложения. Теперь:
+//  - keystore НЕ коммитится (см. .gitignore); CI получает его из секрета
+//    SEKIRA_KEYSTORE_B64 (base64) перед сборкой — см. android.yml;
+//  - пароль и alias — из переменных окружения SEKIRA_STORE_PASSWORD /
+//    SEKIRA_KEY_ALIAS / SEKIRA_KEY_PASSWORD или gradle.properties
+//    (локально — в ~/.gradle/gradle.properties):
+//        sekiraStorePassword=...
+//        sekiraKeyAlias=sekira
+//        sekiraKeyPassword=...
+// ВНИМАНИЕ: старый ключ скомпрометирован (пароль попал в историю git) —
+// сгенерируйте НОВЫЙ, иначе смысла в этом фиксе нет:
+//   keytool -genkeypair -v -keystore keystore/sekira.keystore -alias sekira \
+//       -keyalg RSA -keysize 2048 -validity 10000
+val sekiraStorePassword = System.getenv("SEKIRA_STORE_PASSWORD")
+    ?: providers.gradleProperty("sekiraStorePassword").orNull ?: ""
+val sekiraKeyAlias = System.getenv("SEKIRA_KEY_ALIAS")
+    ?: providers.gradleProperty("sekiraKeyAlias").orNull ?: "sekira"
+val sekiraKeyPassword = System.getenv("SEKIRA_KEY_PASSWORD")
+    ?: providers.gradleProperty("sekiraKeyPassword").orNull ?: sekiraStorePassword
+val sekiraKeystoreExists = rootProject.file("keystore/sekira.keystore").exists()
+
 android {
     namespace = "com.example.autoclicker"
     compileSdk {
@@ -20,43 +44,25 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
-    // ФИКС (v19): единый ФИКСИРОВАННЫЙ ключ подписи для ВСЕХ сборок.
-    // Раньше release подписывался отладочным ключом, который У КАЖДОЙ
-    // машины СВОЙ: ~/.android/debug.keystore у тебя и свежесгенерированный
-    // на каждом запуске GitHub Actions — подписи не совпадали, и новая
-    // версия НЕ СТАВИЛАСЬ ПОВЕРХ старой («Придётся сначала удалить»).
-    // Теперь keystore лежит в репозитории (keystore/sekira.keystore) и
-    // подпись у сборок локально/в CI/разных версий ОДИНАКОВАЯ — обновления
-    // ставятся поверх без удаления данных. Пароль намеренно в открытом
-    // виде: это личный проект, ключ нужен для совместимости обновлений.
-    // ВНИМАНИЕ (одноразово): версия, установленная ДО этой правки,
-    // подписана старым ключом — v19 придётся один раз поставить с
-    // удалением старой (пресеты при удалении стираются, пересохраните
-    // их параметры). Все СЛЕДУЮЩИЕ обновления пойдут поверх.
-    //
-    // ФИКС (v44 / ci): кейстор убран из git (commit a853c0d — security).
-    // Пароли читаются из env vars (см. .github/workflows/android.yml),
-    // с fallback на хардкод для локальных сборок. В CI воркфлоу decode'ит
-    // SIGNING_KEYSTORE_BASE64 в файл keystore/sekira.keystore и прокидывает
-    // SIGNING_KEYSTORE_PASSWORD/SIGNING_KEY_ALIAS/SIGNING_KEY_PASSWORD как
-    // env vars. Локально, если env vars не заданы — fallback на хардкод,
-    // но сам кейстор должен лежать в keystore/sekira.keystore на диске
-    // (можно восстановить из git history: git show ed463cd:keystore/sekira.keystore
-    // > keystore/sekira.keystore).
+    // ФИКС (v19): единый ФИКСИРОВАННЫЙ ключ подписи для ВСЕХ сборок
+    // (иначе release подписывался отладочным, и версии не ставились поверх).
+    // ФИКС (безопасность): keystore и пароли вынесены из репозитория
+    // — см. верх файла и .github/workflows/android.yml
     signingConfigs {
         create("sekira") {
             storeFile = rootProject.file("keystore/sekira.keystore")
-            storePassword = System.getenv("SIGNING_KEYSTORE_PASSWORD") ?: "sekira2026"
-            keyAlias = System.getenv("SIGNING_KEY_ALIAS") ?: "sekira"
-            keyPassword = System.getenv("SIGNING_KEY_PASSWORD") ?: "sekira2026"
+            storePassword = sekiraStorePassword
+            keyAlias = sekiraKeyAlias
+            keyPassword = sekiraKeyPassword
         }
     }
 
     buildTypes {
         debug {
-            // Тот же ключ, что у release: сборки любого варианта/машины
-            // взаимозаменяемы при установке
-            signingConfig = signingConfigs.getByName("sekira")
+            // если keystore не подложен — остаётся отладочный ключ раннера
+            if (sekiraKeystoreExists) {
+                signingConfig = signingConfigs.getByName("sekira")
+            }
         }
         release {
             // ФИЧА: R8-минификация кода + шринк ресурсов в release-сборке.
@@ -70,9 +76,9 @@ android {
             optimization {
                 enable = true
             }
-            // ФИКС (v19): фиксированный ключ из репозитория вместо
-            // отладочного (см. комментарий к signingConfigs выше)
-            signingConfig = signingConfigs.getByName("sekira")
+            if (sekiraKeystoreExists) {
+                signingConfig = signingConfigs.getByName("sekira")
+            }
         }
     }
     compileOptions {
