@@ -240,17 +240,23 @@ class SettingsActivity : AppCompatActivity() {
         ClickService.instance?.ensureOverlays()
 
         // ФИКС: если окно пересоздали, пока шла запись/выбор точки, колбэк
-        // доставить было некому — забираем результаты из службы здесь
+        // доставить было некому — забираем результаты из службы здесь.
+        // ФИКС (баг выбора точки в ST): после восстановления точки через
+        // страховочное хранилище перезаписываем черновик, чтобы последующее
+        // уничтожение активности системой НЕ привело к restoreDraft() с
+        // устаревшим pickedX=-1. То же для результата записи MTWS.
         ClickService.instance?.consumePickResult()?.let { (x, y) ->
             pickedX = x
             pickedY = y
             updatePickedPointLabel()
+            writeDraft()
             toast("Точка: $x, $y")
         }
         ClickService.instance?.consumeRecordResult()?.let { actions ->
             recordedActions = actions.toMutableList()
             updateRecCount()
             rebuildActionsList()
+            writeDraft()
             toast("Записано: ${actions.size} — отредактируйте задержки")
         }
         syncPlaybackState()
@@ -305,6 +311,18 @@ class SettingsActivity : AppCompatActivity() {
             pendingPickCb = null
             pickedX = x
             pickedY = y
+            // ФИКС (баг выбора точки в ST): перезаписываем черновик С НОВОЙ
+            // точкой. На части прошивок (MIUI/HyperOS) служба после этого
+            // колбэка создаёт НОВЫЙ экземпляр SettingsActivity, который
+            // в onCreate зовёт restoreDraft(). Если черновик в этот момент
+            // содержит pickedX=-1 (был записан в pickPoint() ДО выбора
+            // точки), restoreDraft перезаписывает точку на «не выбрана».
+            // consumePickResult в onResume потом исправит точку, но
+            // НЕ перезапишет name/delay (там уже корректные значения из
+            // старого writeDraft). Перезаписывая черновик здесь — мы
+            // гарантируем, что любой новый экземпляр восстановит и
+            // название, и задержку, и точку.
+            writeDraft()
             runOnUiThread {
                 updatePickedPointLabel()
                 // ФИКС (v13): ПОДЪЁМ ОКНА ИЗ КОЛБЭКА УБРАН. Раньше здесь был
@@ -663,10 +681,16 @@ class SettingsActivity : AppCompatActivity() {
         }
         val cb: (List<PresetAction>) -> Unit = { actions ->
             pendingRecordCb = null
+            // ФИКС (баг выбора точки в ST, симметрия для MTWS): перезаписываем
+            // черновик ПОСЛЕ получения результатов записи. Аналогично pickPoint:
+            // на части прошивок создастся новый экземпляр SettingsActivity,
+            // и restoreDraft в onCreate должен увидеть recordedActions,
+            // иначе список действий будет пустым в новом окне.
             runOnUiThread {
                 recordedActions = actions.toMutableList()
                 updateRecCount()
                 rebuildActionsList()
+                writeDraft()
                 toast("Записано: ${actions.size}. Окно снова открыто — отредактируйте задержки")
             }
         }
@@ -803,14 +827,21 @@ class SettingsActivity : AppCompatActivity() {
         val targetPos = position.coerceIn(0, recordedActions.size)
         val cb: (PresetAction?) -> Unit = { action ->
             pendingInsertCb = null
+            // ФИКС (баг выбора точки в ST, симметрия для insertActionAt):
+            // перезаписываем черновик ПОСЛЕ вставки действия. На части
+            // прошивок создастся новый экземпляр SettingsActivity, и
+            // restoreDraft в onCreate должен увидеть обновлённый список
+            // actions — иначе вставленное действие теряется.
             runOnUiThread {
                 if (action != null) {
                     val safePos = targetPos.coerceIn(0, recordedActions.size)
                     recordedActions.add(safePos, action)
                     updateRecCount()
                     rebuildActionsList()
+                    writeDraft()
                     toast("Действие вставлено на позицию ${safePos + 1}")
                 } else {
+                    writeDraft()
                     toast("Вставка отменена")
                 }
             }

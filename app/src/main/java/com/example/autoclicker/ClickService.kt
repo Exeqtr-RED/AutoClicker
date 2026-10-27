@@ -2025,14 +2025,19 @@ class ClickService : AccessibilityService() {
                 hidePickOverlay(x, y)
                 // Сначала результат — в страховочное хранилище: если живой
                 // получатель не найдётся (окно уничтожено), его заберёт
-                // SettingsActivity.onResume() и выбор точки не потеряется
+                // SettingsActivity.onResume() и выбор точки не потеряется.
+                //
+                // ФИКС (баг выбора точки в ST): НЕ обнуляем lastPickResult
+                // после вызова колбэка. На части прошивок (MIUI/HyperOS)
+                // bringBackSettingsEditor создаёт НОВУЮ активность, и
+                // onResume/consumePickResult должен забрать точку — иначе
+                // новое окно показывает «Точка не выбрана», и сохранение
+                // пресета терпит неудачу. consumePickResult() сам обнулит
+                // lastPickResult после чтения — повторной выдачи не будет.
                 lastPickResult = x to y
                 val cb = pickOnDoneRef?.get()
                 pickOnDoneRef = null
-                if (cb != null) {
-                    lastPickResult = null
-                    cb.invoke(x, y)
-                }
+                cb?.invoke(x, y)
                 // ФИЧА (v13): после тапа ПОДНИМАЕМ окно настроек на передний план.
                 // Раньше это делала сама активность (startActivity из фона) —
                 // современные Android блокируют запуск активити из фона, и
