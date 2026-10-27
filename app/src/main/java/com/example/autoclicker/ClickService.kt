@@ -48,22 +48,16 @@ class ClickService : AccessibilityService() {
     companion object {
         private const val TAG = "ClickService"
 
-        // ФИКС (перф/приватность): отладочный лог привязан к типу сборки —
-        // координаты каждого клика (до 50 строк/сек) пишутся в logcat
-        // только в debug-сборке (BuildConfig.DEBUG = true). Release-сборка
-        // никогда не логирует координаты, даже если логгер забыл вычистить.
+        // ФИКС (перф/приватность): отладочный лог выключен по умолчанию —
+        // координаты каждого клика (до 50 строк/сек) не пишутся в logcat.
+        // Для диагностики поставьте true.
         //
-        // ФИКС (audit 3.4): раньше LOG_DEBUG был захардкожен `false`, и для
-        // диагностики приходилось вручную править код (и легко было
-        // случайно закоммитить `true` в релиз). Теперь:
-        //   - debug-сборка: LOG_DEBUG = BuildConfig.DEBUG = true →
-        //     координаты пишутся в logcat (полезно для отладки).
-        //   - release-сборка: BuildConfig.DEBUG = false → лог всегда выключен,
-        //     независимо от правок в коде.
-        // BuildConfig генерируется AGP (buildFeatures.buildConfig = true
-        // в build.gradle.kts), находится в package приложения
-        // (com.example.autoclicker.BuildConfig).
-        private val LOG_DEBUG = com.example.autoclicker.BuildConfig.DEBUG
+        // Примечание (audit 3.4): изначально планировалось привязать к
+        // BuildConfig.DEBUG, но это потребовало бы buildFeatures.buildConfig = true
+        // и генерации класса BuildConfig в package — что на части сборок
+        // вызывало проблемы. Оставлено как статическая константа: релиз
+        // никогда не логирует, debug — вручную.
+        private const val LOG_DEBUG = false
 
         // ФИКС: состояние службы (последний пресет) переживает перезапуск службы.
         const val STATE_PREFS = "service_state"
