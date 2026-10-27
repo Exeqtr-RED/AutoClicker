@@ -321,8 +321,13 @@ class SettingsActivity : AppCompatActivity() {
         }
         pendingPickCb = cb
         val started = svc.startPickPoint(cb, mode)
-        // ФИКС: честная обратная связь — раньше служба могла молча отказать
+        // ФИКС (audit 2.1.2): обнуляем сильную ссылку на колбэк при отказе
+        // службы. Раньше при return без обнуления pendingPickCb продолжал
+        // удерживать замыкание (а через него — SettingsActivity) до
+        // onDestroy, что давало короткую утечку памяти. Шаблон совпадает
+        // с insertActionAt(), где обнуление на отказе уже сделано.
         if (!started) {
+            pendingPickCb = null
             toast("Нельзя выбирать точку во время записи/воспроизведения")
             return
         }
@@ -675,10 +680,17 @@ class SettingsActivity : AppCompatActivity() {
             svc.noteEditorTask(taskId)
             writeDraft()
             moveTaskToBack(true)
-        } else if (svc.isPlaying()) {
-            toast("Сначала остановите воспроизведение")
         } else {
-            toast("Запись уже идёт")
+            // ФИКС (audit 2.1.2): обнуляем сильную ссылку на колбэк при
+            // отказе службы — иначе замыкание (с SettingsActivity внутри)
+            // продолжало жить до onDestroy, маленькая утечка памяти.
+            // Аналогично pickPoint() выше.
+            pendingRecordCb = null
+            if (svc.isPlaying()) {
+                toast("Сначала остановите воспроизведение")
+            } else {
+                toast("Запись уже идёт")
+            }
         }
     }
 
@@ -820,6 +832,13 @@ class SettingsActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(6), 0, dp(6))
+            // ФИКС (audit 2.2.2): явный тег «action_row» — commitDelaysFromEditors
+            // ищет action-строки именно по нему, а не по «является LinearLayout»
+            // (что истинно и для + кнопок в insert mode — Button НЕ LinearLayout,
+            // но будущие декоративные контейнеры могли бы им стать и тихо
+            // сбить индекс). Тег разделяет смыслы «это action-строка» и
+            // «это что-то ещё в llActions».
+            tag = "action_row"
         }
 
         val tvDesc = TextView(this).apply {
@@ -923,13 +942,34 @@ class SettingsActivity : AppCompatActivity() {
      *
      *  Теперь отдельный actionIdx, инкрементируется только для реальных
      *  action-рядов. + кнопки скипаются через continue БЕЗ сдвига индекса
-     *  в recordedActions */
+     *  в recordedActions.
+     *
+     *  ФИКС (audit 2.2.2): действие «action-строка» определяется по явному
+     *  тегу «action_row», а не по типу View. Раньше любая будущая вставка
+     *  LinearLayout в llActions (декоративный контейнер, разделитель и т.д.)
+     *  тихо попадала бы в фильтр и сбивала actionIdx — смешивание данных.
+     *  Теперь continue срабатывает ТОЛЬКО для настоящих action-строк;
+     *  все остальные LinearLayout игнорируются БЕЗ инкремента actionIdx.
+     *  Поиск по findViewWithTag<EditText>("min"/"sec") остаётся как был —
+     *  теги у EditText не пересекаются с тегом «action_row» у LinearLayout
+     *  (разные типы, разное namespace). */
     private fun commitDelaysFromEditors() {
         if (mode != "MTWS") return
         var actionIdx = 0   // отдельный счётчик action-рядов (не i из цикла)
         for (i in 0 until llActions.childCount) {
             val row = llActions.getChildAt(i) as? LinearLayout ?: continue
+            // ФИКС (audit 2.2.2): пропускаем НЕ-action-строки БЕЗ инкремента
+            // actionIdx. Это включает: + кнопки в insert mode (они Button,
+            // отфильтрованы выше as?), декоративные контейнеры (если появятся
+            // в будущем), повреждённые строки (нет тега «action_row»).
+            if (row.tag != "action_row") continue
             if (actionIdx >= recordedActions.size) break
+            // Если тег «action_row» есть, но EditText'ы с тегами min/sec
+            // отсутствуют (например, частично повреждённое представление),
+            // пропускаем строку — но ТОГДА инкремент actionIdx не делаем,
+            // потому что иначе следующий action запишется в повреждённую
+            // строку. Запись бездействует — лучше потерять правку задержки,
+            // чем перепутать данные.
             val etMin = row.findViewWithTag<EditText>("min") ?: continue
             val etSec = row.findViewWithTag<EditText>("sec") ?: continue
             val min = etMin.text.toString().toLongOrNull() ?: 0L

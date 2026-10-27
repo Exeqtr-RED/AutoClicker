@@ -153,7 +153,7 @@
                     android:textSize="11sp"
                     android:textColor="@color/text_hint"
                     android:paddingTop="2dp"
-                    android:text="Число у действия — задержка после него (мс). Пауза перед повторным запуском пресета задаётся полем «Периодичность запуска»." />
+                    android:text="Мин/Сек у действия — задержка после него перед следующим действием. Пауза перед повторным запуском пресета задаётся полем «Периодичность запуска»." />
 
                 <LinearLayout
                     android:layout_width="match_parent"

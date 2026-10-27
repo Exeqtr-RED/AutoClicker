@@ -32,6 +32,14 @@ android {
         version = release(37)
     }
 
+    // ФИКС (audit 3.4): включаем генерацию BuildConfig — нужен для
+    // LOG_DEBUG = BuildConfig.DEBUG в ClickService. По умолчанию AGP 9
+    // включает, но явная декларация страхует от будущих изменений AGP
+    // (и упрощает чтение build.gradle: «нам нужен BuildConfig» — очевидно).
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "com.example.autoclicker"
         minSdk = 24

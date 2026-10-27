@@ -48,10 +48,22 @@ class ClickService : AccessibilityService() {
     companion object {
         private const val TAG = "ClickService"
 
-        // ФИКС (перф/приватность): отладочный лог выключен по умолчанию —
-        // координаты каждого клика (до 50 строк/сек) не пишутся в logcat.
-        // Для диагностики поставьте true.
-        private const val LOG_DEBUG = false
+        // ФИКС (перф/приватность): отладочный лог привязан к типу сборки —
+        // координаты каждого клика (до 50 строк/сек) пишутся в logcat
+        // только в debug-сборке (BuildConfig.DEBUG = true). Release-сборка
+        // никогда не логирует координаты, даже если логгер забыл вычистить.
+        //
+        // ФИКС (audit 3.4): раньше LOG_DEBUG был захардкожен `false`, и для
+        // диагностики приходилось вручную править код (и легко было
+        // случайно закоммитить `true` в релиз). Теперь:
+        //   - debug-сборка: LOG_DEBUG = BuildConfig.DEBUG = true →
+        //     координаты пишутся в logcat (полезно для отладки).
+        //   - release-сборка: BuildConfig.DEBUG = false → лог всегда выключен,
+        //     независимо от правок в коде.
+        // BuildConfig генерируется AGP (buildFeatures.buildConfig = true
+        // в build.gradle.kts), находится в package приложения
+        // (com.example.autoclicker.BuildConfig).
+        private val LOG_DEBUG = com.example.autoclicker.BuildConfig.DEBUG
 
         // ФИКС: состояние службы (последний пресет) переживает перезапуск службы.
         const val STATE_PREFS = "service_state"
@@ -566,13 +578,39 @@ class ClickService : AccessibilityService() {
      * НЕ запускает playback, только подменяет пресет в памяти и state-pref.
      * Если playback уже идёт — обновляет currentPreset (новые параметры
      * применятся со следующего тика: задержка, координаты действий, и т.д.).
+     *
+     * ФИКС (audit 2.2.3): если размер actions изменился (пользователь
+     * добавил/удалил действие в редакторе), текущий actionIndex мог
+     * указывать за пределы нового списка. Без прижатия tick увидел бы
+     * actionIndex >= size и сделал бы цикл — playback перепрыгнул бы
+     * несколько действий вперёд. Теперь actionIndex принудительно
+     * прижимается к новой границе, чтобы продолжение воспроизведения
+     * было безопасным. Сброс в 0 (а не прижатие) тоже допустим, но
+     * нарушал бы UX: при добавлении одного действия в конец списка
+     * playback перескакивал бы в начало. Прижатие мягче.
      */
     fun updateLastPresetIfMatches(preset: Preset): Boolean {
         val lp = lastPreset ?: return false
         if (lp.name != preset.name || lp.mode != preset.mode) return false
+        // ФИКС (audit 2.2.3): размер actions изменился — прижимаем
+        // actionIndex, иначе playback с продолжением после правки
+        // мог бы прыгнуть через действие или уйти за пределы списка.
+        val sizeChanged = lp.actions.size != preset.actions.size
         // Присваиваем новое значение — copy с updated fields
         lastPreset = preset
-        if (playing) currentPreset = preset
+        if (playing) {
+            currentPreset = preset
+            if (sizeChanged && preset.actions.isNotEmpty()) {
+                actionIndex = actionIndex.coerceIn(0, preset.actions.size - 1)
+            } else if (sizeChanged && preset.actions.isEmpty()) {
+                // MTWS-пресет очистили — stopPlayback безопаснее, чем
+                // ждать, когда tick сам это обнаружит (он вызовет
+                // stopPlayback(resetToStart = true), но между этим
+                // моментом и следующим тиком панель показала бы
+                // несогласованное состояние)
+                stopPlayback(resetToStart = true)
+            }
+        }
         persistLastPreset(preset)
         // Если playing, строки панели (progress, tvPresetName) обновятся
         // на следующем тике uiTicker'а — это нормально
@@ -1090,7 +1128,14 @@ class ClickService : AccessibilityService() {
 
     /** ФИЧА (v24): применить введённую задержку — в последний пресет,
      *  в хранилище пресетов (та же пара имя+режим — заменяется) и в идущий
-     *  playback (currentPreset — со следующего тика). false — ввод не число */
+     *  playback (currentPreset — со следующего тика). false — ввод не число
+     *
+     *  ФИКС (audit 2.3.3): разные тосты для верхней и нижней границы.
+     *  Раньше при coerceIn(MIN_DELAY_MS, MAX_PANEL_DELAY_MS) сообщалось
+     *  только о верхней границе («потолок — сутки»), а при вводе 0 или
+     *  отрицательного числа задержка тихо прижималась к 20 мс —
+     *  пользователь не понимал, почему результат именно 20. Теперь
+     *  явно говорится, какая граница сработала. */
     private fun applyDelayFromEditor(input: EditText): Boolean {
         val preset = lastPreset ?: return false
         val raw = input.text.toString().trim().toLongOrNull()
@@ -1105,10 +1150,18 @@ class ClickService : AccessibilityService() {
         persistLastPreset(updated)
         PresetStorage.save(this, updated)
         updatePanelState()
-        toast(if (v != raw)
-            "Задержка: $v мс (потолок — сутки)"
-        else
-            "Задержка сохранена: $v мс")
+        // ФИКС (audit 2.3.3): сообщаем, КАКАЯ граница сработала при
+        // прижатии. raw > MAX_PANEL_DELAY_MS → верхняя граница,
+        // raw < MIN_DELAY_MS → нижняя, иначе ввод без изменений.
+        toast(when {
+            v != raw && raw > MAX_PANEL_DELAY_MS ->
+                "Задержка: $v мс (прижато к потолку — сутки)"
+            v != raw && raw < MIN_DELAY_MS ->
+                "Задержка: $v мс (прижато к минимуму — $MIN_DELAY_MS мс, " +
+                "иначе playback превращается в busy-poll)"
+            else ->
+                "Задержка сохранена: $v мс"
+        })
         return true
     }
 
@@ -2391,8 +2444,17 @@ class ClickService : AccessibilityService() {
                 // прижатый снизу к MIN_DELAY_MS — чтобы отсчёт всегда был
                 // неотрицательным. Системное время + задержка = момент
                 // запуска следующего tick'а, и именно до него считаем.
+                //
+                // ФИКС (audit 2.3.3): для свайпа добавляем длительность самого
+                // жеста (swipeDurationMs) к плановому моменту следующего
+                // действия. Раньше отсчёт показывал только паузу ПОСЛЕ свайпа,
+                // и в течение swipeDurationMs (до 5000 мс) строка прогресса
+                // показывала «00:00» — пользователь не понимал, что происходит.
+                // Теперь отсчёт отражает реальное время до следующего действия:
+                // длительность свайпа + пауза после него.
+                val gestureDuration = if (a.type == "swipe") a.swipeDurationMs else 0L
                 nextActionAtMs = System.currentTimeMillis() +
-                    nextDelay.coerceAtLeast(MIN_DELAY_MS)
+                    (nextDelay + gestureDuration).coerceAtLeast(MIN_DELAY_MS)
                 // ФИКС (v38, перф): обновляем прогресс напрямую из tick —
                 // мгновенно при смене действия. uiTicker потом доведёт
                 // отсчёт до актуальной секунды (см. фикс 2.6: 1-сек интервал)

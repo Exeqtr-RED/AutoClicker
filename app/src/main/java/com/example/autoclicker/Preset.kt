@@ -49,6 +49,21 @@ data class Preset(
     val timingMode: String,    // "INFINITE" / "DURATION" / "CYCLES"
     val durationSec: Long,
     val cycles: Int,
+    /**
+     * Задержка между кликами (мс) — ТОЛЬКО для режима ST.
+     *
+     * Для MTWS-режима это поле НЕ используется при воспроизведении: ритм
+     * MTWS задаётся индивидуальными [PresetAction.delayMs] у каждого
+     * действия пресета. Поле сохраняется в JSON и читается обратно
+     * исключительно ради обратной совместимости со старыми пресетами
+     * (где у действий могло не быть своего delayMs, и fallback-логика
+     * в [PresetAction.fromJson] брала глобальное значение).
+     *
+     * Не редактируйте это поле для MTWS-пресетов в UI — UI и так его
+     * скрывает. При программной сборке MTWS-пресета передавайте 0L.
+     *
+     * ФИКС (audit 3.1): формально помечено как устаревшее для MTWS.
+     */
     val delayMs: Long,
     // ФИЧА: разброс задержки (мс) для ST — реальная пауза между кликами
     // выбирается СЛУЧАЙНО из [delayMs − delayJitterMs; delayMs + delayJitterMs].
@@ -103,6 +118,13 @@ data class Preset(
 object PresetStorage {
     private const val PREF = "presets_v1"
     private const val KEY = "list"
+    // ФИКС (audit 2.3.1): резервный ключ для битого JSON. Если парсинг
+    // списка пресетов упал, оригинал сохраняется сюда (с таймстемпом),
+    // а следующий save() НЕ перезаписывает его «пустотой» — пользователь
+    // может восстановить пресеты вручную из backup-ключа (или мы сделаем
+    // авто-импорт в следующей версии). Без backup-ключа damaged JSON
+    // терялся безвозвратно.
+    private const val KEY_BACKUP_PREFIX = "list_corrupted_"
 
     // ФИКС (v36, перф): кэш распарсенных пресетов — getAll() больше не читает
     // и не парсит JSON при каждом вызове (панель, редактор и фильтр getByMode
@@ -117,18 +139,38 @@ object PresetStorage {
             .getString(KEY, null) ?: return emptyList<Preset>().also { cache = it }
         // ФИКС: битый JSON больше не роняет приложение при каждом открытии
         // настроек — строка целиком и каждая запись парсятся с защитой,
-        // повреждённые элементы просто пропускаются
+        // повреждённые элементы просто пропускаются.
+        // ФИКС (audit 2.3.1): при полной неудаче парсинга сохраняем битый
+        // JSON в backup-ключ — на случай, если это единственный шанс
+        // восстановить пресеты после системного сбоя флешки.
         val parsed = runCatching {
             val arr = JSONArray(s)
             (0 until arr.length()).mapNotNull { i ->
                 runCatching { Preset.fromJson(arr.getJSONObject(i)) }.getOrNull()
             }
-        }.getOrDefault(emptyList())
+        }.getOrElse {
+            // Сохраняем битый оригинал в backup — без него следующий save()
+            // перезаписал бы KEY пустым массивом, и пресеты терялись бы
+            // безвозвратно. runCatching: пишем синхронно (commit), иначе
+            // backup сам может потеряться при тех же условиях, что и KEY.
+            runCatching {
+                val ts = System.currentTimeMillis()
+                ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("$KEY_BACKUP_PREFIX$ts", s)
+                    .commit()
+            }
+            emptyList()
+        }
         // ФИКС (v38, корректность): defensive copy. mapNotNull возвращает
         // ArrayList под типом List — внешние кастинги могли бы мутировать
         // кэш в обход save/delete. toList() даёт неизменяемую копию.
+        // ФИКС (audit 2.2.1): возвращаем именно cache (defensive copy),
+        // а не parsed (исходный ArrayList). Если внешний код приведёт
+        // результат к MutableList и замутирует, кэш PresetStorage
+        // останется нетронутым.
         cache = parsed.toList()
-        return parsed
+        return cache!!
     }
 
     fun getByMode(ctx: Context, mode: String): List<Preset> =
@@ -150,8 +192,18 @@ object PresetStorage {
     private fun persist(ctx: Context, list: List<Preset>) {
         val arr = JSONArray()
         list.forEach { arr.put(it.toJson()) }
+        // ФИКС (audit 2.1.1): apply() → commit(). Раньше persist() писал
+        // АСИНХРОННО — если пользователь сохранял пресет и сразу убивал
+        // приложение (force-stop / OOM-kill / смахивание из недавних),
+        // фоновый writer мог не успеть записать, и пресет терялся.
+        // Тот же сценарий уже исправлен в ClickService.persistLastPreset()
+        // (фикс v42 S5: apply → commit). Здесь логика фиксируется для
+        // PresetStorage — несоответствие устранено.
+        // commit() синхронный (~5–15 мс на современных флешках), persist()
+        // зовётся редко (только при явном save/delete) — накладные расходы
+        // незаметны, зато данные надёжно переживают гибель процесса.
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-            .edit().putString(KEY, arr.toString()).apply()
+            .edit().putString(KEY, arr.toString()).commit()
         // ФИКС (v36): кэш синхронен с хранилищем сразу после записи.
         // ФИКС (v38, корректность): defensive copy — вызывающий код
         // передаёт MutableList (save/delete зовут persist(ctx, all)),
