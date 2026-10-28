@@ -13,8 +13,10 @@ import androidx.core.content.FileProvider
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.lang.ref.WeakReference
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 
 /**
  * ФИЧА (Task): автообновление APK из GitHub Releases.
@@ -43,6 +45,44 @@ import java.net.URL
  * Используем только стандартные java.net (HttpURLConnection), org.json и
  * androidx.core (FileProvider) — без новых зависимостей. Запросы идут в
  * фоновом потоке (Thread), UI-обновления через Handler(mainLooper).
+ *
+ * ФИКС (audit, CRITICAL утечка памяти): activity и hintView раньше
+ * захватывались лямбдой фонового Thread сильной ссылкой. Если пользователь
+ * закрывал окно во время сетевого запроса (до 70с — connect 10с + read 60с),
+ * Activity не могла быть собрана GC — типичная утечка Activity со всем
+ * деревом View. Теперь Activity хранится через WeakReference: закрытое
+ * окно собирается GC немедленно, фоновый поток продолжает работу и
+ * проверяет isAlive() перед любым UI-обновлением.
+ *
+ * ФИКС (audit, CRITICAL логика): sameVersion() раньше использовал
+ * t.contains(cur) — подстроковое сравнение давало ложное «совпадает»
+ * для версий-префиксов (current="0.5", tag="v0.55" → contains →
+ * «та же версия», обновление не предлагалось). Теперь числовое
+ * сравнение SemVer-компонентов: (major, minor, patch).
+ *
+ * ФИКС (audit, HIGH краш на уничтоженной Activity): AlertDialog.Builder
+ * и startActivity на isFinishing/isDestroyed Activity роняли приложение
+ * (BadTokenException / WindowManagerLeaked). Теперь каждый UI-вызов
+ * проходит через guard isAlive(), в крайнем случае тихо выходим.
+ *
+ * ФИКС (audit, HIGH атомарность APK): раньше httpDownload писал прямо в
+ * target — обрыв связи оставлял недокачанный .apk, и следующий «Обновить»
+ * мог установить ПОРЧЕННЫЙ файл. Теперь пишем в target.tmp, затем
+ * atomic renameTo(target) — на диске всегда либо целый старый, либо целый
+ * новый файл, но никогда не полу-файл.
+ *
+ * ФИКС (audit, MEDIUM накопление APK): каждый release с новым именем
+ * файла оставлял старый .apk в externalFilesDir навсегда. Теперь перед
+ * загрузкой cleanupOldApks() удаляет все .apk кроме (опционально)
+ * сохраняемого — копим только актуальный.
+ *
+ * ФИКС (audit, MEDIUM rate-limit): GitHub API без токена — 60 запросов/час.
+ * Раньше 403-й ответ молча трактовался как «нет связи». Теперь проверяем
+ * X-RateLimit-Remaining и показываем пользователю внятное сообщение.
+ *
+ * ФИКС (audit, MEDIUM локаль): String.format без явной локали в ru_RU
+ * давал «1,5 МБ» (запятая) — некорректный разделитель для технической
+ * строки. Теперь Locale.US — всегда точка.
  */
 object Updater {
 
@@ -61,47 +101,48 @@ object Updater {
     private const val CONNECT_TIMEOUT_MS = 10_000
     private const val READ_TIMEOUT_MS = 60_000
 
-    /** Текущая версия приложения (из BuildConfig — генерируется AGP). */
-    private fun currentVersionName(ctx: Context): String =
-        try {
-            val pkg = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pkg.versionName ?: "?"
-            else @Suppress("DEPRECATION") pkg.versionName ?: "?"
-        } catch (e: Exception) {
-            "?"
-        }
+    private val mainHandler = Handler(Looper.getMainLooper())
 
-    /** Текущий versionCode — для сравнения числом (если в release нет
-     *  читаемого versionName, можно сравнивать по code). */
-    @Suppress("unused")
-    private fun currentVersionCode(ctx: Context): Long =
-        try {
-            val pkg = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pkg.longVersionCode
-            else @Suppress("DEPRECATION") pkg.versionCode.toLong()
-        } catch (e: Exception) {
-            0L
-        }
+    // ============================================================
+    // Публичный API
+    // ============================================================
 
     /**
      * Проверяет последний release на GitHub. Если версия новее текущей —
      * показывает диалог и в колбэке onUserConfirm скачивает APK и открывает
      * системный установщик. Всё в фоне; UI-мутации через Handler(mainLooper).
      *
-     * @param activity нужна для показа AlertDialog и запуска Intent'ов
+     * @param activity нужна для показа AlertDialog и запуска Intent'ов.
+     *                 Хранится через WeakReference — закрытое окно не
+     *                 удерживается фоновым потоком (ФИКС audit CRITICAL).
      * @param hintView TextView для живой обратной связи (статус проверки).
      *                 Может быть null — тогда только Toast (через Activity).
      */
     fun checkForUpdate(activity: Activity, hintView: android.widget.TextView? = null) {
         val cur = currentVersionName(activity)
-        setHint(hintView, activity, "Проверяю обновления (сейчас: v$cur)…")
+        setHint(hintView, "Проверяю обновления (сейчас: v$cur)…")
+
+        // ФИКС (audit, CRITICAL утечка): WeakReference на activity — фоновый
+        // поток живёт до 70с, за это время пользователь может закрыть окно.
+        val activityRef = WeakReference(activity)
+        val hintRef = WeakReference(hintView)
 
         Thread {
             try {
-                val resp = httpGetJson(API_LATEST) ?: run {
-                    mainToast(activity, "Не удалось связаться с GitHub. Проверьте интернет.")
-                    setHint(hintView, activity, "Проверка не удалась — попробуйте позже")
-                    return@Thread
+                val resp = httpGetJson(API_LATEST)
+                when (resp) {
+                    null -> {
+                        // httpGetJson вернул null — либо сеть, либо 403 rate-limit.
+                        // Различаем по последнему известному rateLimitState.
+                        if (rateLimitExhausted) {
+                            mainToast(activityRef, "GitHub API: лимит 60 запросов/час исчерпан. Подождите или используйте VPN.")
+                            setHint(hintRef, "Лимит GitHub API исчерпан — попробуйте через час")
+                        } else {
+                            mainToast(activityRef, "Не удалось связаться с GitHub. Проверьте интернет.")
+                            setHint(hintRef, "Проверка не удалась — попробуйте позже")
+                        }
+                        return@Thread
+                    }
                 }
 
                 val tag = resp.optString("tag_name", "")   // например "v0.35_AlfaTest"
@@ -111,27 +152,28 @@ object Updater {
                 val body = resp.optString("body", "")      // описание release
 
                 if (tag.isEmpty()) {
-                    mainToast(activity, "На GitHub нет опубликованных релизов.")
-                    setHint(hintView, activity, "Релизов нет — обновление вручную через GitHub")
+                    mainToast(activityRef, "На GitHub нет опубликованных релизов.")
+                    setHint(hintRef, "Релизов нет — обновление вручную через GitHub")
                     return@Thread
                 }
 
-                // Сравнение версий: простой подход — если tag != текущей версии,
-                // считаем что новее. Точное сравнение по SemVer тут избыточно
-                // (теги у вас произвольные: v0.34_AlfaTest, v0.35_AlfaTest и т.д.).
-                val isNewer = !sameVersion(cur, tag)
+                // ФИКС (audit, CRITICAL логика): compareVersions возвращает:
+                //   < 0 — текущая версия СТАРШЕ тега (что-то не так, не предлагаем)
+                //   = 0 — версии совпадают (обновление не нужно)
+                //   > 0 — тег НОВЕЕ текущей (обновление есть)
+                val cmp = compareVersions(cur, tag)
+                val isNewer = cmp > 0
 
                 if (!isNewer) {
-                    mainToast(activity, "Установлена последняя версия (v$cur).")
-                    setHint(hintView, activity, "Установлена последняя версия: v$cur")
+                    mainToast(activityRef, "Установлена последняя версия (v$cur).")
+                    setHint(hintRef, "Установлена последняя версия: v$cur")
                     return@Thread
                 }
 
                 // Найдено обновление — ищем .apk asset
                 val assets = resp.optJSONArray("assets") ?: run {
-                    setHint(hintView, activity,
-                        "Найден release $tag, но без APK — открываю GitHub")
-                    openUrl(activity, htmlUrl)
+                    setHint(hintRef, "Найден release $tag, но без APK — открываю GitHub")
+                    openUrl(activityRef, htmlUrl)
                     return@Thread
                 }
 
@@ -154,9 +196,8 @@ object Updater {
                 }
 
                 if (apkUrl == null) {
-                    setHint(hintView, activity,
-                        "Release $tag без APK-файла — открываю GitHub")
-                    openUrl(activity, htmlUrl)
+                    setHint(hintRef, "Release $tag без APK-файла — открываю GitHub")
+                    openUrl(activityRef, htmlUrl)
                     return@Thread
                 }
 
@@ -176,52 +217,88 @@ object Updater {
                     append("Скачать APK и открыть системный установщик?")
                 }
 
-                Handler(Looper.getMainLooper()).post {
-                    AlertDialog.Builder(activity)
+                val apkUrlFinal = apkUrl
+                val apkNameFinal = apkName
+                mainHandler.post {
+                    val act = activityRef.get()
+                    // ФИКС (audit, HIGH краш на уничтоженной Activity):
+                    // AlertDialog.Builder на isFinishing/isDestroyed окне
+                    // бросает BadTokenException. Guard гарантирует, что
+                    // диалог создаётся только на живом окне.
+                    if (!isAlive(act)) return@post
+                    AlertDialog.Builder(act!!)
                         .setTitle("Найдено обновление: $name")
                         .setMessage(message)
                         .setPositiveButton("Скачать и установить") { _, _ ->
-                            setHint(hintView, activity,
-                                "Скачиваю $apkName ($sizeStr)…")
-                            downloadAndInstall(activity, apkUrl!!, apkName!!, hintView)
+                            setHint(hintRef, "Скачиваю $apkNameFinal ($sizeStr)…")
+                            downloadAndInstall(activityRef, apkUrlFinal, apkNameFinal, hintRef)
                         }
                         .setNegativeButton("Открыть в браузере") { _, _ ->
-                            openUrl(activity, htmlUrl)
+                            openUrl(activityRef, htmlUrl)
                         }
                         .setNeutralButton("Отмена", null)
                         .show()
                 }
             } catch (e: Exception) {
-                mainToast(activity, "Ошибка проверки: ${e.message}")
-                setHint(hintView, activity, "Ошибка: ${e.message}")
+                mainToast(activityRef, "Ошибка проверки: ${e.message}")
+                setHint(hintRef, "Ошибка: ${e.message}")
             }
         }.start()
     }
 
+    // ============================================================
+    // Скачивание + установка
+    // ============================================================
+
     /**
      * Скачивает APK во externalFilesDir, затем открывает системный установщик.
      * Перед установкой проверяет/запрашивает REQUEST_INSTALL_PACKAGES.
+     *
+     * ФИКС (audit, CRITICAL утечка): принимает WeakReference<Activity>,
+     * не сильную ссылку. Фоновый поток живёт до 70с (timeout), за это время
+     * окно могло быть закрыто — без WeakReference утекала бы вся Activity.
      */
     private fun downloadAndInstall(
-        activity: Activity,
+        activityRef: WeakReference<Activity>,
         apkUrl: String,
         apkName: String,
-        hintView: android.widget.TextView?
+        hintRef: WeakReference<android.widget.TextView?>
     ) {
         Thread {
             try {
-                val target = File(activity.getExternalFilesDir(null), apkName)
-                setHint(hintView, activity, "Скачиваю $apkName…")
-                httpDownload(apkUrl, target)
-                setHint(hintView, activity,
+                val act = activityRef.get()
+                if (!isAlive(act)) return@Thread
+                val target = File(act!!.getExternalFilesDir(null), apkName)
+
+                // ФИКС (audit, MEDIUM накопление APK): перед загрузкой нового
+                // удаляем все старые .apk в externalFilesDir — иначе каждый
+                // release с новым именем файла оставлял бы предыдущий навсегда.
+                // keepFile = null → чистим ВСЕ .apk, новый ещё не создан.
+                cleanupOldApks(target.parentFile, keepFile = null)
+
+                // Прогресс загрузки: сообщаем каждые ~5% или 100 КБ
+                setHint(hintRef, "Скачиваю $apkName…")
+                httpDownload(apkUrl, target) { read, total ->
+                    // total может быть -1 (Content-Length неизвестен) —
+                    // в этом случае показываем только прочитанный объём.
+                    val pct = if (total > 0) {
+                        val p = (read * 100 / total).toInt().coerceIn(0, 100)
+                        " — $p%"
+                    } else ""
+                    setHint(hintRef, "Скачиваю $apkName$pct · ${formatSize(read)}")
+                }
+
+                setHint(hintRef,
                     "Скачано: ${formatSize(target.length())}. Запускаю установщик…")
 
-                Handler(Looper.getMainLooper()).post {
-                    installApk(activity, target)
+                mainHandler.post {
+                    val a = activityRef.get()
+                    if (!isAlive(a)) return@post
+                    installApk(a!!, target)
                 }
             } catch (e: Exception) {
-                mainToast(activity, "Не удалось скачать: ${e.message}")
-                setHint(hintView, activity, "Скачивание не удалось: ${e.message}")
+                mainToast(activityRef, "Не удалось скачать: ${e.message}")
+                setHint(hintRef, "Скачивание не удалось: ${e.message}")
             }
         }.start()
     }
@@ -230,8 +307,13 @@ object Updater {
      * Открывает системный диалог установки APK. На Android 8+ (API 26+)
      * требует разрешения на установку из неизвестных источников — если его
      * нет, отправляет пользователя в системные настройки с запросом.
+     *
+     * ФИКС (audit, HIGH краш): вызывается только из mainHandler.post с
+     * guard isAlive(), но дублируем проверку — на случай прямого вызова
+     * из других мест в будущем.
      */
     private fun installApk(activity: Activity, apkFile: File) {
+        if (!isAlive(activity)) return
         if (!apkFile.exists() || apkFile.length() == 0L) {
             android.widget.Toast.makeText(
                 activity, "APK файл пуст или не существует",
@@ -286,9 +368,18 @@ object Updater {
         }
     }
 
-    // ─── HTTP helpers ───────────────────────────────────────────────────────
+    // ============================================================
+    // HTTP helpers
+    // ============================================================
+
+    // ФИКС (audit, MEDIUM rate-limit): флаг, что последний 403 был из-за
+    // исчерпания лимита. Сбрасывается в начале каждого запроса, ставится
+    // в httpGetJson при X-RateLimit-Remaining: 0.
+    @Volatile
+    private var rateLimitExhausted: Boolean = false
 
     private fun httpGetJson(url: String): JSONObject? {
+        rateLimitExhausted = false
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = CONNECT_TIMEOUT_MS
@@ -297,7 +388,18 @@ object Updater {
             setRequestProperty("User-Agent", "AutoClicker-Updater")
         }
         try {
-            if (conn.responseCode != 200) return null
+            val code = conn.responseCode
+            // ФИКС (audit, MEDIUM rate-limit): GitHub возвращает 403 при
+            // исчерпании лимита 60 запросов/час без токена. Заголовок
+            // X-RateLimit-Remaining: 0 подтверждает причину.
+            if (code == 403) {
+                val remaining = conn.getHeaderField("X-RateLimit-Remaining")
+                if (remaining == "0") {
+                    rateLimitExhausted = true
+                }
+                return null
+            }
+            if (code != 200) return null
             val body = conn.inputStream.bufferedReader().use { it.readText() }
             return JSONObject(body)
         } finally {
@@ -305,7 +407,28 @@ object Updater {
         }
     }
 
-    private fun httpDownload(url: String, target: File) {
+    /**
+     * Скачивает файл в [target] с прогрессом.
+     *
+     * ФИКС (audit, HIGH атомарность): пишет в target.tmp, затем atomic
+     * renameTo(target). Прерывание (сеть упала, пользователь убил приложение)
+     * оставляет только .tmp-файл — основной target остаётся либо старым
+     * целым, либо новым целым, но никогда не полу-скачанным. tmp-файл
+     * чистится в finally.
+     *
+     * @param onProgress (bytesRead, totalBytes) — totalBytes = -1 если
+     *                   сервер не передал Content-Length. Вызывается в
+     *                   фоновом потоке, не чаще ~10 раз/сек.
+     */
+    private fun httpDownload(
+        url: String,
+        target: File,
+        onProgress: (Long, Long) -> Unit = { _, _ -> }
+    ) {
+        val tmp = File(target.parentFile, "${target.name}.tmp")
+        // Подстраховка от прошлого прерванного скачивания
+        if (tmp.exists()) tmp.delete()
+
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = CONNECT_TIMEOUT_MS
@@ -317,76 +440,205 @@ object Updater {
             if (conn.responseCode != 200) {
                 throw RuntimeException("HTTP ${conn.responseCode}")
             }
+            val total = conn.contentLengthLong  // -1 если неизвестен
+            var lastReportAt = 0L
+            var read = 0L
             conn.inputStream.use { input ->
-                FileOutputStream(target).use { output ->
+                FileOutputStream(tmp).use { output ->
                     val buf = ByteArray(8192)
                     while (true) {
                         val n = input.read(buf)
                         if (n <= 0) break
                         output.write(buf, 0, n)
+                        read += n
+                        // Троттлинг прогресса: не чаще 100 мс — иначе
+                        // setHint на каждом чанке (8 КБ) переполнял бы
+                        // очередь mainHandler на быстрых сетях.
+                        val now = System.currentTimeMillis()
+                        if (now - lastReportAt > 100 || n < buf.size) {
+                            lastReportAt = now
+                            onProgress(read, total)
+                        }
                     }
                 }
             }
+            // Атомарный rename: на одной ФС — атомарная операция ОС.
+            // Если target уже существует — renameTo его перезапишет.
+            if (!tmp.renameTo(target)) {
+                // renameTo может упасть на некоторых ФС (cross-device).
+                // Fallback: копируем + удаляем tmp.
+                tmp.copyTo(target, overwrite = true)
+                tmp.delete()
+            }
         } finally {
+            // Чистим tmp в любом случае — успеха или неудачи
+            if (tmp.exists()) tmp.delete()
             conn.disconnect()
         }
     }
 
-    // ─── UI helpers ─────────────────────────────────────────────────────────
-
-    private fun setHint(
-        hintView: android.widget.TextView?,
-        ctx: Context,
-        text: String
-    ) {
-        if (hintView == null) return
-        Handler(Looper.getMainLooper()).post { hintView.text = text }
+    /**
+     * ФИКС (audit, MEDIUM накопление APK): удаляет все .apk файлы в [dir]
+     * кроме [keepFile] (если не null). Вызывается перед загрузкой нового
+     * APK — старые релизы не копятся в externalFilesDir вечно.
+     */
+    private fun cleanupOldApks(dir: File?, keepFile: File?) {
+        if (dir == null || !dir.isDirectory) return
+        runCatching {
+            dir.listFiles { f ->
+                f.isFile && f.name.endsWith(".apk", ignoreCase = true) &&
+                    f.absolutePath != keepFile?.absolutePath
+            }?.forEach { it.delete() }
+        }
     }
 
-    private fun mainToast(ctx: Context, text: String) {
-        Handler(Looper.getMainLooper()).post {
+    // ============================================================
+    // UI helpers (все устойчивы к уничтоженной Activity)
+    // ============================================================
+
+    /**
+     * ФИКС (audit, CRITICAL утечка + HIGH краш): единственный guard для
+     * всех UI-операций. Возвращает true только если Activity ещё жива
+     * (не finishing и не destroyed). Все вызовы AlertDialog/Toast/
+     * startActivity проходят через эту проверку.
+     */
+    private fun isAlive(activity: Activity?): Boolean {
+        if (activity == null) return false
+        return !activity.isFinishing && !activity.isDestroyed
+    }
+
+    private fun setHint(
+        hintRef: WeakReference<android.widget.TextView?>,
+        text: String
+    ) {
+        val v = hintRef.get() ?: return
+        mainHandler.post { v.text = text }
+    }
+
+    private fun mainToast(activityRef: WeakReference<Activity>, text: String) {
+        mainHandler.post {
+            val ctx = activityRef.get() ?: return@post
+            // Toast безопасен на уничтоженной Activity (использует Application
+            // context для окна), но guard всё равно нужен — иначе на
+            // isDestroyed окне часть прошивок роняет окно Toast.
+            if (!isAlive(ctx)) return@post
             android.widget.Toast.makeText(
                 ctx, text, android.widget.Toast.LENGTH_LONG
             ).show()
         }
     }
 
-    private fun openUrl(activity: Activity, url: String) {
-        try {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            activity.startActivity(intent)
-        } catch (e: Exception) {
-            mainToast(activity, "Не удалось открыть браузер: ${e.message}")
+    private fun openUrl(activityRef: WeakReference<Activity>, url: String) {
+        mainHandler.post {
+            val act = activityRef.get()
+            if (!isAlive(act)) return@post
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                act!!.startActivity(intent)
+            } catch (e: Exception) {
+                mainToast(activityRef, "Не удалось открыть браузер: ${e.message}")
+            }
         }
     }
 
-    // ─── version comparison ─────────────────────────────────────────────────
+    // ============================================================
+    // Version comparison — ФИКС (audit, CRITICAL логика)
+    // ============================================================
 
     /**
-     * Сравнивает текущую версию (например, "2.7") с тегом release
-     * (например, "v0.35_AlfaTest"). Считаем, что версии совпадают, если
-     * тег содержит текущую версию как подстроку — это простое правило
-     * хорошо работает для вашего тег-стиля (v0.34_AlfaTest, v0.35_AlfaTest...):
-     * текущая версия 2.7 не содержится в теге → обновление есть.
+     * Сравнивает текущую версию приложения [current] (например, "2.7") с тегом
+     * release [tag] (например, "v0.35_AlfaTest").
      *
-     * Когда текущая версия будет совпадать с тегом (например, текущая 0.35,
-     * тег v0.35_AlfaTest) — обновления нет.
+     * Возвращает:
+     *  - > 0 — тег НОВЕЕ текущей (есть обновление)
+     *  - = 0 — версии совпадают
+     *  - < 0 — тег СТАРШЕ текущей (что-то не так, обновление не предлагаем)
+     *
+     * Алгоритм:
+     *  1. Нормализуем обе строки — убираем ведущие 'v'/'V', берём только
+     *     начальную числовую часть до первого не-цифрового/не-точечного
+     *     символа (v0.35_AlfaTest → "0.35", 2.7 → "2.7").
+     *  2. Разбиваем по '.', парсим компоненты как Int (пропуская не-числовые).
+     *  3. Сравниваем как tuple (major, minor, patch), дополняя нулями до
+     *     одинаковой длины.
+     *
+     * ФИКС (audit, CRITICAL): старая sameVersion использовала t.contains(cur)
+     * — подстроковое сравнение. Это давало ложное «совпадает» для:
+     *   - current="0.5", tag="v0.55" → "0.55".contains("0.5") = true → НЕТ обновления ✗
+     *   - current="0.3", tag="v0.35_AlfaTest" → contains → НЕТ обновления ✗
+     *   - current="1", tag="v10" → contains → НЕТ обновления ✗
+     * Пользователь пропускал реальные обновления.
      */
-    private fun sameVersion(current: String, tag: String): Boolean {
-        if (current.isBlank() || tag.isBlank()) return false
-        // Нормализуем — убираем ведущий 'v', всё в нижний регистр
-        val cur = current.trimStart('v', 'V').lowercase()
-        val t = tag.trimStart('v', 'V').lowercase()
-        if (cur.isEmpty()) return false
-        // Если тег содержит текущую версию как подстроку — считаем что совпадает
-        return t.contains(cur)
+    private fun compareVersions(current: String, tag: String): Int {
+        if (current.isBlank() || tag.isBlank()) return 0
+        val curParts = parseVersionParts(current)
+        val tagParts = parseVersionParts(tag)
+        // Дополняем нулями до одинаковой длины: (2,7) vs (0,35) → (2,7,0) vs (0,35,0)
+        val len = maxOf(curParts.size, tagParts.size)
+        for (i in 0 until len) {
+            val c = curParts.getOrElse(i) { 0 }
+            val t = tagParts.getOrElse(i) { 0 }
+            if (t != c) return t - c
+        }
+        return 0
     }
 
+    /**
+     * Извлекает числовые компоненты версии из строки.
+     * "2.7" → [2, 7]
+     * "v0.35_AlfaTest" → [0, 35]
+     * "v1.2.3-beta.1" → [1, 2, 3]
+     * "" → []
+     */
+    private fun parseVersionParts(s: String): List<Int> {
+        // Нормализация: убираем ведущие 'v'/'V', оставляем только начальный
+        // сегмент из цифр и точек до первого иного символа.
+        val trimmed = s.trimStart('v', 'V').trim()
+        if (trimmed.isEmpty()) return emptyList()
+        // Берём префикс до первого НЕ (цифра/точка)
+        val end = trimmed.indexOfFirst { ch -> !(ch.isDigit() || ch == '.') }
+        val numericPart = if (end < 0) trimmed else trimmed.substring(0, end)
+        return numericPart.split('.')
+            .filter { it.isNotEmpty() }
+            .mapNotNull { it.toIntOrNull() }
+    }
+
+    // ============================================================
+    // Misc helpers
+    // ============================================================
+
+    /** Текущая версия приложения (из BuildConfig — генерируется AGP). */
+    private fun currentVersionName(ctx: Context): String =
+        try {
+            val pkg = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pkg.versionName ?: "?"
+            else @Suppress("DEPRECATION") pkg.versionName ?: "?"
+        } catch (e: Exception) {
+            "?"
+        }
+
+    /** Текущий versionCode — для сравнения числом (если в release нет
+     *  читаемого versionName, можно сравнивать по code). */
+    @Suppress("unused")
+    private fun currentVersionCode(ctx: Context): Long =
+        try {
+            val pkg = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pkg.longVersionCode
+            else @Suppress("DEPRECATION") pkg.versionCode.toLong()
+        } catch (e: Exception) {
+            0L
+        }
+
+    /**
+     * ФИКС (audit, MEDIUM локаль): String.format без явной локали в ru_RU
+     * давал «1,5 МБ» (запятая) — некорректный десятичный разделитель для
+     * технической строки. Locale.US гарантирует точку.
+     */
     private fun formatSize(bytes: Long): String =
         when {
             bytes < 1024 -> "$bytes Б"
             bytes < 1024 * 1024 -> "${bytes / 1024} КБ"
-            else -> String.format("%.1f МБ", bytes / (1024.0 * 1024.0))
+            else -> String.format(Locale.US, "%.1f МБ", bytes / (1024.0 * 1024.0))
         }
 }

@@ -22,7 +22,6 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
-import android.view.ViewGroup
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -238,7 +237,20 @@ class ClickService : AccessibilityService() {
     // перенумеруется в in-place refresh без re-inflate), params хранится
     // здесь же — refreshMtwsMarkers обновляет позицию маркера через
     // тот же объект LayoutParams, что и touch-listener, без приведения типов
-    private class MtwsMarker(val view: View, var index: Int, val params: WindowManager.LayoutParams)
+    // ФИКС (audit, HIGH перф): tvNum — кешированная ссылка на TextView
+    // номера. Раньше refreshMtwsMarkers на каждом вызове делал
+    // marker.view.findViewById(R.id.tvPointNum) для КАЖДОГО маркера —
+    // findViewById это O(n) обход дерева view. На пресете из 20 точек
+    // это 20 findViewById за один refresh, а refreshMtwsMarkers зовётся
+    // из десятков мест (stopPlayback, hidePickOverlay, toggleCrosshair,
+    // ensureOverlays, stopRecordingInternal). Теперь один findViewById
+    // в момент inflate (в addMtwsMarker) + прямое tvNum.text в refresh.
+    private class MtwsMarker(
+        val view: View,
+        var index: Int,
+        val params: WindowManager.LayoutParams,
+        val tvNum: TextView?
+    )
     private val mtwsMarkers = mutableListOf<MtwsMarker>()
 
     // ФИКС: учёт отложенных long-press'ов маркеров. Без него runnable
@@ -1255,7 +1267,13 @@ class ClickService : AccessibilityService() {
             lastPreset = preset.copy(actions = preset.actions.mapIndexed { i, act ->
                 if (i == 0) act.copy(x1 = nx, y1 = ny) else act
             })
-            persistLastPreset(lastPreset!!)
+            // ФИКС (audit, HIGH перф): на ACTION_MOVE (persistToStorage=false)
+            // передаём sync=false — apply() асинхронно, не блокирует UI на
+            // 5-15 мс commit() на каждое MOVE-событие (десятки в секунду
+            // при драге крестика). На ACTION_UP (persistToStorage=true) —
+            // sync=true (commit, переживает гибель процесса); этот же вызов
+            // подстрахует потерю последней позиции от apply на MOVE.
+            persistLastPreset(lastPreset!!, sync = persistToStorage)
         }
         // ФИКС (v37): фикс бага 1.9 — правки крестика не теряются при
         // переоткрытии редактора и рестарте службы. Коммит в постоянное
@@ -1698,14 +1716,18 @@ class ClickService : AccessibilityService() {
         val v = runCatching { LayoutInflater.from(this).inflate(R.layout.crosshair, null) }
             .getOrElse { Log.e(TAG, "showClickMarker: inflate failed", it); return }
         // Перекрашиваем ⊕ в зелёный, чтобы не путать с перетаскиваемым
-        // красным крестиком. crosshair.xml: FrameLayout -> TextView
-        // ФИКС (ошибка 365:46 "Incomplete code"): безопасный вызов ?. нельзя
-        // цеплять сразу за as?-приведением — парсер читает «TextView?» как
-        // тип и спотыкается о «.setTextColor». Выносим приведение в переменную.
-        val markerText = (v as? ViewGroup)?.getChildAt(0) as? TextView
+        // красным крестиком.
+        // ФИКС (audit, HIGH): раньше использовали хрупкий cast
+        //   (v as? ViewGroup)?.getChildAt(0) as? TextView
+        // Любое изменение структуры crosshair.xml (декоративный слой,
+        // обёртка, переупорядочивание детей) молча ломало перекраску —
+        // clickMarker оставался красным и визуально сливался с крестиком.
+        // Теперь findViewById(R.id.crosshairText) — стабильно к
+        // рефакторингу layout (ID добавлен в crosshair.xml).
         // ФИКС (v36): цвет из палитры colors.xml (был хардкод 0xFF00CC44 —
         // близкий к accent_green оттенок; теперь единый зелёный палитры)
-        markerText?.setTextColor(ContextCompat.getColor(this, R.color.accent_green))
+        v.findViewById<TextView>(R.id.crosshairText)
+            ?.setTextColor(ContextCompat.getColor(this, R.color.accent_green))
 
         clickMarkerParams = p
         clickMarker = v
@@ -1813,7 +1835,10 @@ class ClickService : AccessibilityService() {
                 val p = marker.params
                 p.x = (a.x1.toFloat() - half).toInt()
                 p.y = (a.y1.toFloat() - half).toInt()
-                marker.view.findViewById<TextView>(R.id.tvPointNum)?.text = (i + 1).toString()
+                // ФИКС (audit, HIGH перф): используем кеш tvNum вместо
+                // findViewById на каждом refresh — refreshMtwsMarkers
+                // зовётся из десятков мест, findViewById это O(n) обход.
+                marker.tvNum?.text = (i + 1).toString()
                 runCatching { wm.updateViewLayout(marker.view, p) }
             }
             return
@@ -1857,12 +1882,16 @@ class ClickService : AccessibilityService() {
         }
         val v = runCatching { LayoutInflater.from(this).inflate(R.layout.point_marker, null) }
             .getOrElse { Log.e(TAG, "addMtwsMarker: inflate failed", it); return }
-        v.findViewById<TextView>(R.id.tvPointNum)?.text = (index + 1).toString()
+        // ФИКС (audit, HIGH перф): кешируем TextView номера ОДИН раз при
+        // inflate — refreshMtwsMarkers будет использовать кеш вместо
+        // findViewById на каждом вызове (см. комментарий в MtwsMarker).
+        val tvNum = v.findViewById<TextView>(R.id.tvPointNum)
+        tvNum?.text = (index + 1).toString()
 
         // ФИКС (v38, перф): params хранится в маркере, refresh обновляет
         // позицию через тот же объект — touch-listener и refresh разделяют
         // состояние без рассинхрона
-        val marker = MtwsMarker(v, index, p)
+        val marker = MtwsMarker(v, index, p, tvNum)
         mtwsMarkers.add(marker)
         if (runCatching { wm.addView(v, p) }.isFailure) {
             mtwsMarkers.remove(marker)
@@ -2293,6 +2322,24 @@ class ClickService : AccessibilityService() {
             consecutiveCancels = 0
             // UI-мутации — через handler.post, всегда на главном
             handler.post {
+                // ФИКС (audit, CRITICAL race): onCompleted асинхронен —
+                // жест, отправленный в прошлой сессии playback, может
+                // завершиться ПОСЛЕ stopPlayback+startPlayback. Без
+                // проверки clickCount получал фантомный +1 в начале
+                // новой сессии (счётчик «1» до первого реального клика).
+                // @Volatile playing читается здесь безопасно: handler.post
+                // выполняется на главном потоке, как и запись playing
+                // в stopPlayback/startPlayback.
+                if (!playing) {
+                    // Не выходим по return, если pendingTick=true —
+                    // иначе протухший onCompleted заблокировал бы
+                    // следующий tick (хотя playback уже не идёт, флаг
+                    // нужно сбросить). Просто не трогаем clickCount.
+                    if (pendingTick) {
+                        pendingTick = false
+                    }
+                    return@post
+                }
                 // ФИЧА: считаем только реально завершённые жесты.
                 // (v27: отдельных «ручных шагов мимо playback» больше нет —
                 // перемотка ◀/▶ исполняет действия через tick, поэтому КАЖДЫЙ
@@ -2961,24 +3008,30 @@ class ClickService : AccessibilityService() {
      * службы (disableSelf / убийство системой) кнопка «Старт» на панели снова
      * работает сразу после включения службы. Туда же пишутся правки точек
      * MTWS (перетаскивание/удаление нумерованных маркеров).
+     *
+     * ФИКС (audit, HIGH перф): параметр sync. Раньше всегда commit()
+     * (синхронная запись на диск ~5-15 мс). На drag-MOVE крестика это
+     * вызывалось десятками раз в секунду и вызываало ощутимый jank
+     * на медленных флешках (видно как «дёрганое» перетаскивание).
+     * Теперь:
+     *  - sync = false (вызов из ACTION_MOVE): apply() — асинхронная
+     *    запись в фон, не блокирует UI. Может потерять последнюю
+     *    позицию при немедленном force-kill, но это приемлемо: при
+     *    ACTION_UP мы всё равно коммитим синхронно.
+     *  - sync = true (по умолчанию, вызов из ACTION_UP / save /
+     *    applyPresetFromPanel): commit() — синхронная запись, переживает
+     *    гибель процесса. Используется для одноразовых событий.
      */
-    private fun persistLastPreset(preset: Preset) {
+    private fun persistLastPreset(preset: Preset, sync: Boolean = true) {
         runCatching {
-            // ФИКС (v42, баг S5): apply → commit. apply() асинхронно —
-            // правка (drag крестика/маркера, изменение задержки в редакторе
-            // панели) могла потеряться, если пользователь сразу убивал
-            // приложение (force-stop / OOM kill) до того, как фоновый
-            // writer успевал сработать. commit() синхронный — ждёт записи
-            // на диск, ~5-15 мс на современных флешках, незаметно.
-            //
-            // persistLastPreset зовётся редко (только на правки с плавающей
-            // панели), не на каждом тике — синхронная запись тут дёшево.
-            // Сравните с writeDraft в SettingsActivity — там тоже commit()
-            // для той же причины (пережить гибель процесса).
-            getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
+            val ed = getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_LAST_PRESET, preset.toJson().toString())
-                .commit()
+            // ФИКС (v42, баг S5): для одноразовых событий — commit
+            // (синхронно, переживает гибель процесса).
+            // ФИКС (audit, HIGH перф): для высокочастотного drag-MOVE —
+            // apply (асинхронно, не блокирует UI).
+            if (sync) ed.commit() else ed.apply()
         }
     }
 
