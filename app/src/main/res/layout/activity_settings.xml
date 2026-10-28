@@ -541,28 +541,14 @@
                 android:layout_height="52dp"
                 android:layout_marginTop="14dp"
                 android:minWidth="0dp"
-                android:background="@drawable/btn_secondary"
-                app:backgroundTint="@null"
-                android:stateListAnimator="@null"
-                android:textSize="15sp"
-                android:textColor="@color/text_primary"
-                android:textAllCaps="false"
-                android:text="Сохранить пресет" />
-
-            <Button
-                android:id="@+id/btnStart"
-                android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:layout_marginTop="8dp"
-                android:minWidth="0dp"
                 android:background="@drawable/btn_play_green"
                 app:backgroundTint="@null"
                 android:stateListAnimator="@null"
                 android:textSize="15sp"
                 android:textStyle="bold"
-                android:textColor="@color/text_primary"
+                android:textColor="@color/white"
                 android:textAllCaps="false"
-                android:text="ЗАПУСТИТЬ" />
+                android:text="Сохранить пресет" />
 
             <Button
                 android:id="@+id/btnStop"
@@ -570,12 +556,12 @@
                 android:layout_height="52dp"
                 android:layout_marginTop="8dp"
                 android:minWidth="0dp"
-                android:background="@drawable/btn_primary"
+                android:background="@drawable/btn_stop"
                 app:backgroundTint="@null"
                 android:stateListAnimator="@null"
                 android:textSize="15sp"
                 android:textStyle="bold"
-                android:textColor="@color/text_primary"
+                android:textColor="@color/white"
                 android:textAllCaps="false"
                 android:visibility="gone"
                 android:text="ОСТАНОВИТЬ" />

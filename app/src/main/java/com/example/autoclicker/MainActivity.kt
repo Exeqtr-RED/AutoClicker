@@ -62,6 +62,15 @@ class MainActivity : AppCompatActivity() {
             }
             openAccessibilitySettings()
         }
+
+        // ФИЧА (Task): кнопка проверки обновлений с GitHub.
+        // Запускает Updater.checkForUpdate — опрашивает GitHub API для
+        // последнего release, сравнивает версию, и если новее —
+        // скачивает APK и открывает системный установщик.
+        findViewById<Button>(R.id.btnUpdate).setOnClickListener {
+            val hint = findViewById<TextView>(R.id.tvUpdateHint)
+            Updater.checkForUpdate(this, hint)
+        }
     }
 
     override fun onResume() {

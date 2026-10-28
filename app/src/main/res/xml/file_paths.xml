@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ФИЧА (Task): FileProvider для отдачи скачанного APK системному установщику.
+
+     Разрешаем делиться файлами из:
+     - external-files-path: getExternalFilesDir(null) → /Android/data/<pkg>/files/
+       — сюда скачиваем APK перед установкой. Системный установщик читает его
+         через content:// Uri, после установки файл можно оставить или удалить.
+
+     external-cache-path добавлен для возможных временных файлов.
+     files-path и cache-path добавлены как страховка. -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-files-path
+        name="apk_downloads"
+        path="." />
+    <external-cache-path
+        name="cache"
+        path="." />
+    <files-path
+        name="internal_files"
+        path="." />
+    <cache-path
+        name="internal_cache"
+        path="." />
+</paths>

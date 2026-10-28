@@ -63,7 +63,8 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var etRepeatSec: EditText
     private lateinit var tvPickedPoint: TextView
     private lateinit var llPresets: LinearLayout
-    private lateinit var btnStart: Button
+    // ФИКС (Task): btnStart удалён из UI — пресет запускается с плавающей
+    // панели. Оставляем btnStop для экстренной остановки из редактора.
     private lateinit var btnStop: Button
     // ФИЧА: разброс задержки ST — чекбокс + поле величины в мс.
     // Включён → реальная задержка случайно из [delay − jitter; delay + jitter]
@@ -122,7 +123,6 @@ class SettingsActivity : AppCompatActivity() {
         etRepeatSec = findViewById(R.id.etRepeatSec)
         tvPickedPoint = findViewById(R.id.tvPickedPoint)
         llPresets = findViewById(R.id.llPresets)
-        btnStart = findViewById(R.id.btnStart)
         btnStop = findViewById(R.id.btnStop)
         llJitterRow = findViewById(R.id.llJitterRow)
         cbJitter = findViewById(R.id.cbJitter)
@@ -182,7 +182,8 @@ class SettingsActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnAddAction).setOnClickListener {
             toggleInsertMode()
         }
-        btnStart.setOnClickListener { startPlayback() }
+        // ФИКС (Task): btnStart удалён — пресет запускается с плавающей панели.
+        // btnStop остаётся для экстренной остановки из редактора.
         btnStop.setOnClickListener { stopPlayback() }
         btnPickPoint.setOnClickListener { pickPoint() }
 
@@ -1044,8 +1045,10 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun syncPlaybackState() {
+        // ФИКС (Task): btnStart удалён — пресет запускается с плавающей панели.
+        // Кнопка btnStop видна только во время воспроизведения — иначе
+        // пользователь не увидит «лишних» кнопок в простое.
         val playing = ClickService.instance?.isPlaying() == true
-        btnStart.visibility = if (playing) View.GONE else View.VISIBLE
         btnStop.visibility = if (playing) View.VISIBLE else View.GONE
     }
 

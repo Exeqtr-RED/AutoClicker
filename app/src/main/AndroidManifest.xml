@@ -12,6 +12,16 @@
          Normal permission (Protection level: normal) — granted at install,
          runtime prompt НЕ нужен -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- ФИЧА (Task): автообновление с GitHub.
+         INTERNET — качать APK и опрашивать GitHub API для последнего release.
+         Normal permission (Protection level: normal) — granted at install. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- ФИЧА (Task): разрешение на установку APK из неизвестных источников.
+         Signature permission (Protection level: signature) — на Android 8+
+         требует явного системного диалога (Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES),
+         пользователь должен разрешить установку для нашего приложения.
+         Без этого permission Intent.ACTION_INSTALL_PACKAGE тихо откажет. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="true"
@@ -19,7 +29,8 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AutoClicker">
+        android:theme="@style/Theme.AutoClicker"
+        android:usesCleartextTraffic="false">
 
         <activity
             android:name=".MainActivity"
@@ -45,5 +56,19 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- ФИЧА (Task): FileProvider для отдачи скачанного APK системному
+             установщику (Intent.ACTION_INSTALL_PACKAGE / View). Начиная с
+             Android 7 (API 24), file:// Uri запрещён — нужен content://
+             через FileProvider. Конфигурация в res/xml/file_paths.xml. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>
