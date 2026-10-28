@@ -240,14 +240,15 @@ object Updater {
             return
         }
 
-        // Android 8+ (API 26): проверяем разрешение на установку
+        // Android 8+ (API 26): проверяем разрешение на установку из
+        // неизвестных источников. Правильный API — canRequestPackageInstalls()
+        // (canPackageBeInstalled не существует в PackageManager).
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            !activity.packageManager.canPackageBeInstalled(packageName = activity.packageName)
+            !activity.packageManager.canRequestPackageInstalls()
         ) {
-            // canPackageBeInstalled доступен только с API 26, на 26-27 сигнатура
-            // может отличаться — используем общий fallback через UnknownSources.
-            // Точный путь: Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES.
-            // (на API < 26 разрешение не нужно — система просто спросит при установке)
+            // canRequestPackageInstalls доступен с API 26 (Build.VERSION_CODES.O).
+            // Точный путь запроса: Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES
+            // (на API < 26 разрешение не нужно — система просто спросит при установке).
             val intent = Intent(
                 Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                 Uri.parse("package:${activity.packageName}")
