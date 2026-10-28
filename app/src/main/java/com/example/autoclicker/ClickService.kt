@@ -1717,17 +1717,20 @@ class ClickService : AccessibilityService() {
             .getOrElse { Log.e(TAG, "showClickMarker: inflate failed", it); return }
         // Перекрашиваем ⊕ в зелёный, чтобы не путать с перетаскиваемым
         // красным крестиком.
-        // ФИКС (audit, HIGH): раньше использовали хрупкий cast
+        // ФИКС (audit, HIGH, откат): изначально планировалось заменить cast
         //   (v as? ViewGroup)?.getChildAt(0) as? TextView
-        // Любое изменение структуры crosshair.xml (декоративный слой,
-        // обёртка, переупорядочивание детей) молча ломало перекраску —
-        // clickMarker оставался красным и визуально сливался с крестиком.
-        // Теперь findViewById(R.id.crosshairText) — стабильно к
-        // рефакторингу layout (ID добавлен в crosshair.xml).
+        // на findViewById(R.id.crosshairText) с добавлением ID в crosshair.xml.
+        // Но при частичном применении правок (только .kt без .xml) R-класс не
+        // содержит crosshairText → Unresolved reference на этапе компиляции,
+        // сборка падает. Чтобы правка была самодостаточной (только .kt),
+        // оставлен позиционный cast — он работает независимо от того,
+        // добавлен ли ID в XML. Структура crosshair.xml (FrameLayout →
+        // единственный TextView) стабильна с первой версии.
         // ФИКС (v36): цвет из палитры colors.xml (был хардкод 0xFF00CC44 —
         // близкий к accent_green оттенок; теперь единый зелёный палитры)
-        v.findViewById<TextView>(R.id.crosshairText)
-            ?.setTextColor(ContextCompat.getColor(this, R.color.accent_green))
+        @Suppress("DEPRECATION")
+        val markerText = (v as? android.view.ViewGroup)?.getChildAt(0) as? TextView
+        markerText?.setTextColor(ContextCompat.getColor(this, R.color.accent_green))
 
         clickMarkerParams = p
         clickMarker = v

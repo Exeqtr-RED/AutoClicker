@@ -120,7 +120,10 @@ object Updater {
      */
     fun checkForUpdate(activity: Activity, hintView: android.widget.TextView? = null) {
         val cur = currentVersionName(activity)
-        setHint(hintView, "Проверяю обновления (сейчас: v$cur)…")
+        // ФИКС (audit compile error): первый вызов setHint идёт ДО создания
+        // hintRef — передаём WeakReference напрямую, чтобы совпало с новой
+        // сигнатурой setHint(WeakReference<TextView?>, String).
+        setHint(WeakReference(hintView), "Проверяю обновления (сейчас: v$cur)…")
 
         // ФИКС (audit, CRITICAL утечка): WeakReference на activity — фоновый
         // поток живёт до 70с, за это время пользователь может закрыть окно.
@@ -226,12 +229,16 @@ object Updater {
                     // бросает BadTokenException. Guard гарантирует, что
                     // диалог создаётся только на живом окне.
                     if (!isAlive(act)) return@post
+                    // ФИКС (audit compile error): apkUrlFinal/apkNameFinal
+                    // формально String? — но мы выше проверили apkUrl==null
+                    // и вышли по return@Thread. Smart-cast Kotlin сюда не
+                    // распространяет, поэтому !! безопасно.
                     AlertDialog.Builder(act!!)
                         .setTitle("Найдено обновление: $name")
                         .setMessage(message)
                         .setPositiveButton("Скачать и установить") { _, _ ->
                             setHint(hintRef, "Скачиваю $apkNameFinal ($sizeStr)…")
-                            downloadAndInstall(activityRef, apkUrlFinal, apkNameFinal, hintRef)
+                            downloadAndInstall(activityRef, apkUrlFinal!!, apkNameFinal!!, hintRef)
                         }
                         .setNegativeButton("Открыть в браузере") { _, _ ->
                             openUrl(activityRef, htmlUrl)

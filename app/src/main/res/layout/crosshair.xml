@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Прицел ST-режима: кольцо + ⊕, перетаскивается. Структура
-     FrameLayout -> TextView не менялась: clickMarker перекрашивает
-     дочерний TextView через getChildAt(0) -->
+     FrameLayout -> TextView стабильна с первой версии: clickMarker
+     перекрашивает дочерний TextView через getChildAt(0).
+     ФИКС (audit, откат): ранее добавлялся android:id="@+id/crosshairText"
+     для замены cast на findViewById, но при частичном применении правок
+     (только .kt без .xml) R-класс не содержал crosshairText → сборка падала.
+     Возврат к исходной структуре — правка самодостаточна одним .kt файлом. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="48dp"
     android:layout_height="48dp"
