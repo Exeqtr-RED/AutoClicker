@@ -47,7 +47,7 @@ android {
         // Маркер сборки (v39): Настройки -> Приложения -> Sekira Cliker ->
         // версия 2.7 (18). Если там 2.7 — APK собран из свежих файлов
         versionCode = 18
-        versionName = "2.7"
+        versionName = "2.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
