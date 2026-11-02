@@ -1456,6 +1456,11 @@ class ClickService : AccessibilityService() {
         val longPressTimeout = ViewConfiguration.getLongPressTimeout().toLong()
         var longPressFired = false
         val longPressExpand = Runnable {
+            // ФИКС: если окно пузыря было снято, пока удержание ещё было
+            // отложено (служба пересоздала оверлеи, закрытие через приложение,
+            // гонка с onDestroy), не разворачиваем панель — иначе runnable
+            // «фантомно» раскрывал панель без действия пользователя
+            if (bubble !== v) return@Runnable
             longPressFired = true
             haptic()
             expandFromBubble()
@@ -1768,7 +1773,13 @@ class ClickService : AccessibilityService() {
     }
 
     private fun hideClickMarker() {
-        clickMarker?.let { runCatching { wm.removeView(it) } }
+        clickMarker?.let {
+            // ФИКС: отменяем незавершённую анимацию клика — иначе
+            // ViewPropertyAnimator с withEndAction удерживал снятый с окна
+            // view ~150 мс и мутировал его уже после удаления
+            it.animate().cancel()
+            runCatching { wm.removeView(it) }
+        }
         clickMarker = null
         clickMarkerParams = null
     }
@@ -2520,6 +2531,20 @@ class ClickService : AccessibilityService() {
         else
             v
 
+    // ФИКС: джиттер не должен выводить жест за пределы дисплея. Система
+    // отменяет жест с координатой вне экрана (onCancelled), а 5 отмен подряд
+    // останавливают playback с тостом «Жесты блокируются» — для точек у
+    // самого края (x=0 или x=width) случайный сдвиг ±RANDOM_OFFSET_PX мог
+    // дать именно такую координату. Прижимаем к [0; размер-1].
+    // displayMetrics у контекста службы в сплит-скрине могут быть меньше
+    // физического экрана — клэмп в меньшую сторону безопасен (жесты чуть
+    // теснее к центру, но не отменяются)
+    private fun clampX(v: Float): Float =
+        v.coerceIn(0f, resources.displayMetrics.widthPixels - 1f)
+
+    private fun clampY(v: Float): Float =
+        v.coerceIn(0f, resources.displayMetrics.heightPixels - 1f)
+
     /** ФИЧА: пауза ST со случайным разбросом ±jitterMs (включается чекбоксом
      *  «Разброс» в настройках Single Target). Равномерный выбор из
      *  [delayMs − jitterMs; delayMs + jitterMs]; при jitterMs <= 0 пауза
@@ -2533,9 +2558,10 @@ class ClickService : AccessibilityService() {
     }
 
     private fun performTap(x: Float, y: Float) {
-        // ФИЧА: случайный сдвиг — клики не ложатся пиксель-в-пиксель
-        val tx = jitterCoord(x)
-        val ty = jitterCoord(y)
+        // ФИЧА: случайный сдвиг — клики не ложатся пиксель-в-пиксель.
+        // ФИКС: после сдвига координата клэмпится к границам экрана
+        val tx = clampX(jitterCoord(x))
+        val ty = clampY(jitterCoord(y))
         val path = Path().apply { moveTo(tx, ty) }
         val stroke = GestureDescription.StrokeDescription(path, 0L, 50L)
         val g = GestureDescription.Builder().addStroke(stroke).build()
@@ -2551,11 +2577,12 @@ class ClickService : AccessibilityService() {
     }
 
     private fun performSwipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long) {
-        // ФИЧА: случайный сдвиг стартовой и конечной точек свайпа
-        val jx1 = jitterCoord(x1)
-        val jy1 = jitterCoord(y1)
-        val jx2 = jitterCoord(x2)
-        val jy2 = jitterCoord(y2)
+        // ФИЧА: случайный сдвиг стартовой и конечной точек свайпа.
+        // ФИКС: после сдвига координаты клэмпятся к границам экрана
+        val jx1 = clampX(jitterCoord(x1))
+        val jy1 = clampY(jitterCoord(y1))
+        val jx2 = clampX(jitterCoord(x2))
+        val jy2 = clampY(jitterCoord(y2))
         val path = Path().apply {
             moveTo(jx1, jy1)
             lineTo(jx2, jy2)
@@ -2903,14 +2930,26 @@ class ClickService : AccessibilityService() {
         if (runCatching { wm.addView(v, p) }.isFailure) {
             Log.e(TAG, "showRecordStopButton: addView failed")
             recordStopBtn = null
+            // ФИКС: ссылка на TextView из НЕДОБАВЛЕННОГО окна не должна
+            // оставаться — иначе updateRecCountOverlay писал бы в detached view
+            recCountOverlayRef = null
             return false
         }
         return true
     }
 
-    /** ФИЧА (v23): обновить счётчик записанных действий на оверлее записи */
+    /** ФИЧА (v23): обновить счётчик записанных действий на оверлее записи.
+     *  ФИКС: в single-action режиме (вставка одного действия) recordedActions
+     *  НАМЕРЕННО не очищается и не пополняется — там остаётся список прошлой
+     *  многошаговой записи, и счётчик показывал чужое «Записано: N». В этом
+     *  режиме показываем подсказку вместо счётчика */
     private fun updateRecCountOverlay() {
-        recCountOverlayRef?.text = "Записано: ${recordedActions.size}"
+        val ref = recCountOverlayRef ?: return
+        if (singleActionCb != null) {
+            ref.text = "Один тап или свайп"
+        } else {
+            ref.text = "Записано: ${recordedActions.size}"
+        }
     }
 
     /**

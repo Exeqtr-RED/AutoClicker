@@ -89,6 +89,16 @@ class MainActivity : AppCompatActivity() {
         if (ClickService.instance != null) ClickService.instance?.ensureOverlays()
     }
 
+    override fun onPause() {
+        super.onPause()
+        // ФИКС: отложенные перепроверки не должны срабатывать в фоне, пока
+        // окно неактивно (ушли в системные настройки — runnable-ы дёргали
+        // UI остановленной активности). onResume перепланирует их при
+        // возврате — с правильного момента (именно возврат — точка гонки
+        // с асинхронным подключением службы)
+        recheckHandler.removeCallbacks(recheckRunnable)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         // ФИКС (v37): без removeCallbacks Runnable удерживал бы Activity

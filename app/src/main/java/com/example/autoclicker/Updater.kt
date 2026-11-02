@@ -101,7 +101,22 @@ object Updater {
     private const val CONNECT_TIMEOUT_MS = 10_000
     private const val READ_TIMEOUT_MS = 60_000
 
+    // ФИКС: prefs для пути к скачанному APK, ожидающему установки.
+    // Хранится ДОЛГОВЕЧНО (не только пока жив процесс): пользователь уходит
+    // в системные настройки разрешения на минуту — процесс может быть убит
+    // и пересоздан, путь должен это пережить
+    private const val UPDATER_PREFS = "updater_state"
+    private const val KEY_PENDING_APK = "pending_apk_path"
+
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    // ФИКС: защита от повторного входа. Быстрый двойной тап по кнопке
+    // «Обновить приложение» запускал ДВА параллельных потока: два диалога
+    // и два скачивания в ОДИН и тот же target.tmp — второй поток дописывал
+    // в файл первого, atomic-rename при этом не спасал: оба писали один tmp.
+    // Повторный тап, пока идёт проверка/скачивание, игнорируется с тостом
+    @Volatile
+    private var inFlight = false
 
     // ============================================================
     // Публичный API
@@ -119,16 +134,45 @@ object Updater {
      *                 Может быть null — тогда только Toast (через Activity).
      */
     fun checkForUpdate(activity: Activity, hintView: android.widget.TextView? = null) {
-        val cur = currentVersionName(activity)
+        // ФИКС: повторный тап, пока идёт проверка/скачивание — игнорируем
+        if (inFlight) {
+            android.widget.Toast.makeText(
+                activity,
+                "Проверка/скачивание обновления уже идёт",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
         // ФИКС (audit compile error): первый вызов setHint идёт ДО создания
         // hintRef — передаём WeakReference напрямую, чтобы совпало с новой
         // сигнатурой setHint(WeakReference<TextView?>, String).
-        setHint(WeakReference(hintView), "Проверяю обновления (сейчас: v$cur)…")
-
         // ФИКС (audit, CRITICAL утечка): WeakReference на activity — фоновый
         // поток живёт до 70с, за это время пользователь может закрыть окно.
         val activityRef = WeakReference(activity)
         val hintRef = WeakReference(hintView)
+
+        // ФИКС (тупик после выдачи разрешения на установку). Сценарий:
+        // проверка → диалог → скачивание → canRequestPackageInstalls()==false →
+        // система отправляет пользователя в настройки разрешения → он
+        // разрешает и возвращается → повторный тап «Обновить» →
+        // compareVersions отвечает «Установлена последняя версия» — и
+        // скачанный APK больше НЕЛЬЗЯ установить никак: файл лежит в
+        // externalFilesDir, но путь к нему нигде не сохранён. Теперь путь
+        // сохраняется в prefs ДО запроса разрешения, а когда разрешение
+        // уже выдано — сразу предлагается установка скачанного файла,
+        // без похода в сеть
+        if (installPermissionGranted(activity)) {
+            val pending = getPendingApk(activity)
+            if (pending != null) {
+                offerPendingInstall(activity, pending, hintRef)
+                return
+            }
+        }
+
+        inFlight = true
+        val cur = currentVersionName(activity)
+        setHint(hintRef, "Проверяю обновления (сейчас: v$cur)…")
 
         Thread {
             try {
@@ -249,6 +293,11 @@ object Updater {
             } catch (e: Exception) {
                 mainToast(activityRef, "Ошибка проверки: ${e.message}")
                 setHint(hintRef, "Ошибка: ${e.message}")
+            } finally {
+                // Проверка завершена (все return@Thread и исключения).
+                // Диалог может ждать подтверждения — скачивание выставит
+                // флаг заново в своём потоке
+                inFlight = false
             }
         }.start()
     }
@@ -272,6 +321,10 @@ object Updater {
         hintRef: WeakReference<android.widget.TextView?>
     ) {
         Thread {
+            // Проверка к этому моменту завершилась (inFlight сброшен) —
+            // скачивание выставляет флаг заново: повторный тап во время
+            // загрузки не запустит второй поток в тот же .tmp
+            inFlight = true
             try {
                 val act = activityRef.get()
                 if (!isAlive(act)) return@Thread
@@ -306,6 +359,8 @@ object Updater {
             } catch (e: Exception) {
                 mainToast(activityRef, "Не удалось скачать: ${e.message}")
                 setHint(hintRef, "Скачивание не удалось: ${e.message}")
+            } finally {
+                inFlight = false
             }
         }.start()
     }
@@ -343,6 +398,11 @@ object Updater {
                 Uri.parse("package:${activity.packageName}")
             ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             try {
+                // ФИКС: запоминаем путь к скачанному APK — когда пользователь
+                // вернётся с выданным разрешением, следующий тап «Обновить»
+                // предложит установить ЭТОТ файл (раньше он навсегда терялся:
+                // см. комментарий в checkForUpdate)
+                savePendingApk(activity, apkFile)
                 activity.startActivity(intent)
                 android.widget.Toast.makeText(
                     activity,
@@ -367,12 +427,94 @@ object Updater {
         }
         try {
             activity.startActivity(intent)
+            // ФИКС: APK передан системному установщику — pending-ключ больше
+            // не нужен; следующий «Обновить» пойдёт обычным путём
+            clearPendingApk(activity)
         } catch (e: Exception) {
             android.widget.Toast.makeText(
                 activity, "Не удалось открыть установщик: ${e.message}",
                 android.widget.Toast.LENGTH_LONG
             ).show()
         }
+    }
+
+    // ============================================================
+    // Скачанный APK, ожидающий установки (после выдачи разрешения)
+    // ============================================================
+
+    /** true, если установка из неизвестных источников уже разрешена
+     *  (на API < 26 разрешения не существует — считаем выданным) */
+    private fun installPermissionGranted(activity: Activity): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+        return activity.packageManager.canRequestPackageInstalls()
+    }
+
+    private fun savePendingApk(activity: Activity, apkFile: File) {
+        runCatching {
+            activity.getSharedPreferences(UPDATER_PREFS, Context.MODE_PRIVATE)
+                .edit().putString(KEY_PENDING_APK, apkFile.absolutePath).commit()
+        }
+    }
+
+    /** Возвращает скачанный APK, ожидающий установки (или null). Ключ НЕ
+     *  очищается здесь — только после успешной передачи файла установщику
+     *  (clearPendingApk), чтобы отменённый диалог предлагался снова.
+     *  Файл, удалённый cleanupOldApks перед новой загрузкой, отсеивается
+     *  проверкой существования. */
+    private fun getPendingApk(activity: Activity): File? {
+        val path = runCatching {
+            activity.getSharedPreferences(UPDATER_PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_PENDING_APK, null)
+        }.getOrNull() ?: return null
+        val f = File(path)
+        if (!f.isFile || f.length() == 0L) {
+            clearPendingApk(activity)
+            return null
+        }
+        return f
+    }
+
+    private fun clearPendingApk(activity: Activity) {
+        runCatching {
+            activity.getSharedPreferences(UPDATER_PREFS, Context.MODE_PRIVATE)
+                .edit().remove(KEY_PENDING_APK).commit()
+        }
+    }
+
+    /** Диалог «установить ранее скачанный APK» — продолжение прерванной
+     *  установки (см. комментарий в checkForUpdate). Негативная кнопка
+     *  снимает pending и запускает обычную проверку, если пользователь
+     *  хочет сравнить с новейшим релизом на GitHub */
+    private fun offerPendingInstall(
+        activity: Activity,
+        apkFile: File,
+        hintRef: WeakReference<android.widget.TextView?>
+    ) {
+        setHint(hintRef,
+            "Скачанный APK готов к установке: ${apkFile.name} " +
+                    "(${formatSize(apkFile.length())})")
+        AlertDialog.Builder(activity)
+            .setTitle("Установить скачанное обновление?")
+            .setMessage(
+                "Файл: ${apkFile.name}\n" +
+                "Размер: ${formatSize(apkFile.length())}\n\n" +
+                "Этот APK был скачан ранее, но установка не состоялась — " +
+                "не хватало разрешения на установку из неизвестных источников. " +
+                "Разрешение уже выдано, можно устанавливать."
+            )
+            .setPositiveButton("Установить") { _, _ ->
+                installApk(activity, apkFile)
+            }
+            .setNegativeButton("Проверить GitHub заново") { _, _ ->
+                // Пользователь выбрал свежую проверку вместо локального файла:
+                // снимаем pending, иначе getPendingApk снова перехватит тап
+                // и зациклит диалог (файл на диске удалится при следующей
+                // загрузке через cleanupOldApks)
+                clearPendingApk(activity)
+                checkForUpdate(activity, hintRef.get())
+            }
+            .setNeutralButton("Отмена", null)
+            .show()
     }
 
     // ============================================================
