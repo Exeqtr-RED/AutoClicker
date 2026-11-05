@@ -44,10 +44,13 @@ android {
         applicationId = "com.example.autoclicker"
         minSdk = 24
         targetSdk = 37
-        // Маркер сборки (v39): Настройки -> Приложения -> Sekira Cliker ->
-        // версия 2.7 (18). Если там 2.7 — APK собран из свежих файлов
-        versionCode = 18
-        versionName = "2.8"
+        // Маркер сборки (v49/share): Настройки -> Приложения -> Sekira Cliker ->
+        // версия 2.9 (19). Если там 2.9 — APK собран из свежих файлов.
+        // versionName ДОЛЖЕН расти вместе с тегом релиза: Updater сравнивает
+        // tag_name release (v2.9) с установленной versionName (2.9) —
+        // тег равный или старше установленной версии обновление не покажет
+        versionCode = 19
+        versionName = "2.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -146,6 +149,12 @@ dependencies {
     implementation(libs.androidx.constraintlayout)
     implementation(libs.androidx.core.ktx)
     implementation(libs.material)
+    // ФИКС (share-ветка): реальные классы org.json для ЛОКАЛЬНЫх юнит-тестов.
+    // android.jar в unit-тестах содержит заглушки «Stub!» — PresetTest и
+    // PresetShareTest не могли выполниться (RuntimeException при создании
+    // JSONObject). Тесты PresetStorage работают на эмуляторе (androidTest),
+    // им зависимость не нужна
+    testImplementation("org.json:json:20240303")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)

@@ -33,6 +33,9 @@ class SettingsActivity : AppCompatActivity() {
         // ФИЧА: потолок величины разброса задержки ST (мс) — 1 минута.
         // Разброс больше не имеет смысла: интервал [delay − jitter; delay + jitter]
         private const val MAX_JITTER_MS = 60_000L
+
+        // ФИЧА (share): requestCode для SAF-пикера импорта пресетов
+        private const val REQ_IMPORT_PRESETS = 4001
     }
 
     private lateinit var mode: String
@@ -90,6 +93,17 @@ class SettingsActivity : AppCompatActivity() {
     // кнопки, тап по + запускает запись одного действия и вставляет его
     // на выбранную позицию. false = обычный список действий
     private var insertMode = false
+
+    // ФИКС (share-ветка, баг черновика): флаг «onNewIntent сменил режим и
+    // вызвал recreate()». При recreate() старый экземпляр проходит onDestroy
+    // с isFinishing == false → writeDraft() — но поля формы в этот момент
+    // ещё содержат данные СТАРОГО режима, а draftKey() строится от УЖЕ
+    // нового mode. Итог: ST-черновик записывался в ключ draft_MTWS (и
+    // наоборот) — при следующем «свежем» открытии редактора другого режима
+    // restoreDraft() показывал ЧУЖИЕ поля. Теперь: если режим сменился через
+    // onNewIntent, черновик НЕ перезаписываем (данные старого режима остаются
+    // в своём ключе, поля формы восстановит система через view-state)
+    private var pendingModeSwap = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -193,6 +207,12 @@ class SettingsActivity : AppCompatActivity() {
         updateJitterFieldState()
         btnBack.setOnClickListener { finish() }
 
+        // ФИЧА (share): кнопка «Импорт пресетов» — SAF-пикер, принимает
+        // файлы .sekira.json (application/json / text / octet-stream)
+        findViewById<Button>(R.id.btnImportPresets).setOnClickListener {
+            launchPresetImport()
+        }
+
         refreshPresets()
         updateRecCount()
         rebuildActionsList()
@@ -279,6 +299,10 @@ class SettingsActivity : AppCompatActivity() {
         setIntent(intent)
         val newMode = intent.getStringExtra("mode")
         if (newMode != null && newMode != mode) {
+            // ФИКС (share-ветка): см. комментарий к pendingModeSwap —
+            // onDestroy этого экземпляра не должен писать черновик старого
+            // режима в ключ нового
+            pendingModeSwap = true
             mode = newMode
             recreate()
         }
@@ -292,9 +316,11 @@ class SettingsActivity : AppCompatActivity() {
         pendingRecordCb = null
         // ФИЧА (v39): то же для колбэка вставки одного действия
         pendingInsertCb = null
-        // ФИКС (v18): явный выход («Назад») — черновик не нужен;
-        // уничтожение СИСТЕМОЙ в фоне — сохраняем введённое для восстановления
-        if (isFinishing) clearDraft() else writeDraft()
+        // ФИКС (share-ветка): при recreate() после смены режима черновик не
+        // трогаем — иначе данные старого режима уехали бы в ключ нового
+        if (pendingModeSwap) {
+            pendingModeSwap = false
+        } else if (isFinishing) clearDraft() else writeDraft()
     }
 
     // ---------- Выбор точки тапа ----------
@@ -381,17 +407,40 @@ class SettingsActivity : AppCompatActivity() {
             llPresets.addView(tv)
             return
         }
+        // ФИЧА (share): клик — загрузить в редактор, долгий тап — МЕНЮ
+        // (поделиться / удалить). Раньше долгий тап сразу удалял —
+        // случайно потерять пресет было проще, чем отправить другу
         list.forEach { preset ->
             val btn = Button(this).apply {
                 text = preset.name
                 setOnClickListener { loadPreset(preset) }
                 setOnLongClickListener {
-                    confirmDelete(preset)
+                    showPresetMenu(preset)
                     true
                 }
             }
             llPresets.addView(btn)
         }
+    }
+
+    /**
+     * ФИЧА (share): меню долгого тапа по пресету — «Поделиться» / «Удалить».
+     * Поделиться → PresetShare.share (JSON-файл через системный шэринг);
+     * удалить — прежний confirmDelete (с защитой от удаления активного
+     * пресета службы).
+     */
+    private fun showPresetMenu(p: Preset) {
+        val items = arrayOf("Поделиться", "Удалить")
+        AlertDialog.Builder(this)
+            .setTitle(if (p.mode == "ST") p.name else "MTWS · ${p.name}")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> PresetShare.share(this, p)
+                    1 -> confirmDelete(p)
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
     }
 
     private fun loadPreset(p: Preset) {
@@ -670,6 +719,51 @@ class SettingsActivity : AppCompatActivity() {
             getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE)
                 .edit().remove(draftKey()).commit()
         }
+    }
+
+    // ---------- Импорт пресетов (share) ----------
+
+    /** ФИЧА (share): открыть SAF-пикер для выбора файла пресета.
+     *  ACTION_GET_CONTENT + CATEGORY_OPENABLE; mime-типы — application/json,
+     *  text/plain, application/octet-stream (файловые менеджеры помечают
+     *  .json всеми тремя). EXTRA_MIME_TYPES — список ограничений типов; общий type-фильтр — «любой файл»
+     *  (звёздочка-слэш-звёздочка; эту последовательность нельзя писать в KDoc —
+     *  она открывает вложенный блочный комментарий и съедает код). */
+    private fun launchPresetImport() {
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf("application/json", "text/plain", "application/octet-stream")
+            )
+        }
+        runCatching {
+            @Suppress("DEPRECATION")
+            startActivityForResult(
+                Intent.createChooser(intent, "Выберите файл пресета"),
+                REQ_IMPORT_PRESETS
+            )
+        }.onFailure {
+            toast("Не найден файловый менеджер для выбора файла")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_IMPORT_PRESETS) return
+        val uri = data?.data ?: return
+        if (resultCode != RESULT_OK) return
+        // Чтение и разбор — через PresetShare (все ошибки глотаются внутри:
+        // битый файл не должен ронять редактор)
+        val text = PresetShare.readTextFromUri(this, uri)
+        val presets = PresetShare.parsePayload(text)
+        if (presets.isEmpty()) {
+            toast("Файл не содержит корректных пресетов Sekira Cliker")
+            return
+        }
+        PresetShare.showImportDialog(this, presets)
     }
 
     // ---------- Запись ----------

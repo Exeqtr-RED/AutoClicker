@@ -135,6 +135,19 @@ object PresetStorage {
 
     fun getAll(ctx: Context): List<Preset> {
         cache?.let { return it }
+        // ФИКС (share-ветка): getAll/save/delete теперь @Synchronized —
+        // объект-синглтон. Раньше две threads могли одновременно пройти
+        // check-then-act по кэшу и получить два разных среза списка, а
+        // save()/delete() могли потерять обновление друг друга (read-modify-write
+        // без блокировки). В приложении оба вызывающих — главный поток,
+        // но импорт пресетов (PresetShare.importPresets) идёт из колбэков,
+        // а androidTest — из тестового потока; блокировка дешёвая (commit
+        // всё равно дороже), зато инвариант «кэш == хранилище» гарантирован
+        return synchronized(this) { getAllLocked(ctx) }
+    }
+
+    private fun getAllLocked(ctx: Context): List<Preset> {
+        cache?.let { return it }
         val s = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
             .getString(KEY, null) ?: return emptyList<Preset>().also { cache = it }
         // ФИКС: битый JSON больше не роняет приложение при каждом открытии
@@ -173,9 +186,11 @@ object PresetStorage {
         return cache!!
     }
 
+    @Synchronized
     fun getByMode(ctx: Context, mode: String): List<Preset> =
         getAll(ctx).filter { it.mode == mode }
 
+    @Synchronized
     fun save(ctx: Context, preset: Preset) {
         val all = getAll(ctx).toMutableList()
         all.removeAll { it.name == preset.name && it.mode == preset.mode }
@@ -183,6 +198,7 @@ object PresetStorage {
         persist(ctx, all)
     }
 
+    @Synchronized
     fun delete(ctx: Context, name: String, mode: String) {
         val all = getAll(ctx).toMutableList()
         all.removeAll { it.name == name && it.mode == mode }

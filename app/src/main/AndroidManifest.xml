@@ -39,6 +39,36 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- ФИЧА (share): приём пресетов. ACTION_SEND — «Поделиться →
+                 Sekira Cliker» из мессенджера/файлового менеджера (файл
+                 EXTRA_STREAM или текст EXTRA_TEXT). MIME application/json,
+                 text/plain и application/octet-stream — как именно
+                 прошивка пометит .sekira.json, зависит от источника.
+                 Разбор в PresetShare.handleIncomingIntent — обычный шареный
+                 текст без JSON тихо игнорируется. -->
+            <intent-filter android:label="Импортировать пресет в Sekira Cliker">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+
+            <!-- ФИЧА (share): «Открыть с помощью» на файле пресета.
+                 scheme content — SAF/современные менеджеры; file — старые
+                 прошивки (до 7.0 поведение). BROWSABLE — ссылка content://
+                 из чата в браузере тоже попадёт сюда. -->
+            <intent-filter android:label="Открыть пресет в Sekira Cliker">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
         </activity>
 
         <activity

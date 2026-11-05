@@ -201,7 +201,7 @@
                 android:textSize="13sp"
                 android:lineSpacingExtra="2dp"
                 android:textColor="@color/text_secondary"
-                android:text="Версия: 2.7 (build 18). Нажмите «Обновить» для проверки новой версии с GitHub." />
+                android:text="Версия: … (заполняется из PackageInfo при запуске)" />
         </LinearLayout>
 
     </LinearLayout>

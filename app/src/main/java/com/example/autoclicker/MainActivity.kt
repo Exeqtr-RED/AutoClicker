@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -28,6 +29,11 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // ФИЧА (share): приём пресета из внешнего приложения (мессенджер,
+        // файловый менеджер — ACTION_SEND / ACTION_VIEW). Если intent —
+        // обычный запуск лаунчера, handleIncomingIntent тихо выходит
+        PresetShare.handleIncomingIntent(this, intent)
 
         findViewById<Button>(R.id.btnSingle).setOnClickListener {
             openSettings("ST")
@@ -71,6 +77,34 @@ class MainActivity : AppCompatActivity() {
             val hint = findViewById<TextView>(R.id.tvUpdateHint)
             Updater.checkForUpdate(this, hint)
         }
+
+        // ФИКС (share-ветка): надпись версии больше НЕ хардкодится в layout.
+        // Раньше текст «Версия: 2.7 (build 18)» лежал в XML и забыл
+        // обновиться, когда в gradle уже была 2.8 — на экране всегда
+        // отставала на версию. Теперь читаем PackageInfo при каждом
+        // onCreate: врет не может в принципе. Updater перезапишет текст
+        // своим статусом при проверке обновления
+        findViewById<TextView>(R.id.tvUpdateHint).text =
+            "Версия: ${currentVersion()}. Кнопка «Обновить» — проверка новой версии с GitHub."
+    }
+
+    /** Человекочитаемая версия установленного пакета «2.9 (build 19)». */
+    private fun currentVersion(): String = try {
+        val pkg = packageManager.getPackageInfo(packageName, 0)
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
+            pkg.longVersionCode
+        else @Suppress("DEPRECATION") pkg.versionCode.toLong()
+        "${pkg.versionName ?: "?"} (build $code)"
+    } catch (e: Exception) {
+        "?"
+    }
+
+    // ФИЧА (share): если экземпляр MainActivity жив и пользователь шарьит
+    // пресет повторно — intent приходит через onNewIntent
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        PresetShare.handleIncomingIntent(this, intent)
     }
 
     override fun onResume() {
